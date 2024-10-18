@@ -64,7 +64,8 @@ public:
     auto alloc = rewriter.create<LocalAllocOp>(
         trans.getLoc(),
         MemDescType::get(srcTy.getShape(), srcTy.getElementType(),
-                         newInnerCvtEnc, sharedMemorySpace),
+                         newInnerCvtEnc, sharedMemorySpace,
+                         /*mutableMemory=*/true),
         trans.getSrc());
     auto newTrans = rewriter.create<TransOp>(trans.getLoc(), alloc,
                                              ArrayRef<int32_t>({1, 0}));
