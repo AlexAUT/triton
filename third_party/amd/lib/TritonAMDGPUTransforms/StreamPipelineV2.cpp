@@ -147,12 +147,39 @@ void StreamPipeliner::createStreamCopy(
       builder.create<ttg::LocalStoreOp>(loc, copy->getResult(0), viewLoad);
   // Clean up old local caches.
   SmallVector<ttg::LocalAllocOp> allocsToErase;
+  // Collect affected transpose operation. We will need to rewrite them to use
+  // mutable memory
+  SmallVector<triton::TransOp> transposeOpsToRewrite;
   for (Operation *user : loadOp->getUsers()) {
     if (auto alloc = dyn_cast<ttg::LocalAllocOp>(user)) {
+      auto memDesc = alloc.getResult().getType();
+      if (!memDesc.getMutableMemory()) {
+        for (Operation *subUser : alloc->getUsers()) {
+          if (auto trans = dyn_cast<triton::TransOp>(subUser)) {
+            transposeOpsToRewrite.push_back(trans);
+          }
+        }
+      }
       alloc.replaceAllUsesWith(viewLoad.getResult());
       allocsToErase.push_back(alloc);
     }
   }
+  // Rewrite transpose op to result in a mutable memory view
+  for (auto &oldTransOp : transposeOpsToRewrite) {
+    if (auto nonMutableMemDesc =
+            dyn_cast<triton::MemDescType>(oldTransOp->getResult(0).getType())) {
+      auto mutableMemDesc = tt::MemDescType::get(
+          nonMutableMemDesc.getShape(), nonMutableMemDesc.getElementType(),
+          nonMutableMemDesc.getEncoding(), nonMutableMemDesc.getMemorySpace(),
+          /*mutableMemory=*/true);
+      auto newTrans = builder.create<triton::TransOp>(
+          oldTransOp->getLoc(), mutableMemDesc, viewLoad.getResult(),
+          oldTransOp.getOrder().vec());
+      oldTransOp->replaceAllUsesWith(newTrans);
+      oldTransOp.erase();
+    }
+  }
+  transposeOpsToRewrite.clear();
   for (auto alloc : allocsToErase)
     alloc.erase();
 
