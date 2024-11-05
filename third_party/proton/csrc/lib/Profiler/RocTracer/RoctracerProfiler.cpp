@@ -5,6 +5,11 @@
 #include "Driver/GPU/HsaApi.h"
 #include "Driver/GPU/RoctracerApi.h"
 
+#define HIP_PROF_HIP_API_STRING 1
+
+#include "roctracer/hip_ostream_ops.h"
+#include "roctracer/roctracer.h"
+
 #include "hip/amd_detail/hip_runtime_prof.h"
 #include "roctracer/roctracer_ext.h"
 #include "roctracer/roctracer_hip.h"
@@ -169,6 +174,7 @@ std::pair<bool, bool> matchKernelCbId(uint32_t cbId) {
   case HIP_API_ID_hipModuleLaunchCooperativeKernel:
   case HIP_API_ID_hipModuleLaunchCooperativeKernelMultiDevice:
   case HIP_API_ID_hipGraphExecDestroy:
+  case HIP_API_ID_hipGraphInstantiateWithFlags:
   case HIP_API_ID_hipGraphInstantiate: {
     isRuntimeApi = true;
     break;
@@ -219,6 +225,21 @@ void RoctracerProfiler::RoctracerProfilerPimpl::apiCallback(
     uint32_t domain, uint32_t cid, const void *callbackData, void *arg) {
   auto [isRuntimeAPI, isDriverAPI] = matchKernelCbId(cid);
 
+  std::string api_name = hip_api_name(cid);
+  if (api_name.find("graph") != std::string::npos ||
+      api_name.find("Graph") != std::string::npos) {
+    std::cerr << "Api callback" << domain << " " << hip_api_name(cid)
+              << std::endl;
+    const hip_api_data_t *data = (const hip_api_data_t *)(callbackData);
+    std::cout << hipApiString(static_cast<hip_api_id_t>(cid), data)
+              << std::endl;
+    std::cout << "Corr id: " << data->correlation_id << std::endl;
+  }
+
+  if (cid == HIP_API_ID_hipGraphInstantiateWithFlags) {
+    std::cerr << "Create graph" << std::endl;
+  }
+
   if (!(isRuntimeAPI || isDriverAPI)) {
     return;
   }
@@ -238,8 +259,15 @@ void RoctracerProfiler::RoctracerProfilerPimpl::apiCallback(
       if (cid == HIP_API_ID_hipGraphLaunch) {
         pImpl->CorrIdToIsHipGraph[data->correlation_id] = true;
         hipGraphExec_t GraphExec = data->args.hipGraphLaunch.graphExec;
+        std::cout << "GraphExec: " << GraphExec << std::endl;
         numInstances = std::numeric_limits<size_t>::max();
         bool findGraph = false;
+        auto map = pImpl->GraphExecToGraph.map;
+        std::cerr << map.size();
+        for (auto [key, value] : map) {
+          std::cerr << "Ptr: " << key << std::endl;
+        }
+        std::cerr << "Lok: " << GraphExec << std::endl;
         if (pImpl->GraphExecToGraph.contain(GraphExec)) {
           hipGraph_t Graph = pImpl->GraphExecToGraph[GraphExec];
           if (pImpl->GraphToNumInstances.contain(Graph)) {
@@ -301,6 +329,13 @@ void RoctracerProfiler::RoctracerProfilerPimpl::apiCallback(
           pImpl->StreamToCaptureCount[Stream]++;
         break;
       }
+      case HIP_API_ID_hipGraphInstantiateWithFlags: {
+        hipGraph_t Graph = data->args.hipGraphInstantiateWithFlags.graph;
+        hipGraphExec_t GraphExec =
+            *(data->args.hipGraphInstantiateWithFlags.pGraphExec);
+        pImpl->GraphExecToGraph[GraphExec] = Graph;
+        break;
+      }
       case HIP_API_ID_hipGraphInstantiate: {
         hipGraph_t Graph = data->args.hipGraphInstantiate.graph;
         hipGraphExec_t GraphExec = *(data->args.hipGraphInstantiate.pGraphExec);
@@ -330,6 +365,9 @@ void RoctracerProfiler::RoctracerProfilerPimpl::activityCallback(
       reinterpret_cast<const roctracer_record_t *>(end);
   uint64_t maxCorrelationId = 0;
 
+  std::cerr << "ActivityCallback: " << record
+            << " corr: " << record->correlation_id << std::endl;
+
   while (record != endRecord) {
     // Log latest completed correlation id.  Used to ensure we have flushed all
     // data on stop
@@ -342,6 +380,7 @@ void RoctracerProfiler::RoctracerProfilerPimpl::activityCallback(
             : Scope::DummyScopeId;
     auto isAPI = correlation.apiExternIds.contain(externId);
     bool isGraph = pImpl->CorrIdToIsHipGraph.contain(record->correlation_id);
+    std::cout << "Is graph: " << isGraph << std::endl;
     processActivity(correlation.corrIdToExternId, correlation.apiExternIds,
                     externId, dataSet, record, isAPI, isGraph);
     // Track correlation ids from the same stream and erase those <

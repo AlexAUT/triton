@@ -51,8 +51,8 @@ public:
     map.clear();
   }
 
-private:
   Container map;
+private:
   std::shared_mutex mutex;
 };
 
