@@ -604,79 +604,227 @@ struct AsyncCopyGlobalToLocalOpConversion
     // We need to ensure that we write coalesced into shared memory. This means
     // that the kLane dim needs to be contigeous based on the vectorization
     // size.
-    if (!writesCoalscedIntoLocalMemory(rewriter, srcTy, dstTy, maxVec)) {
-      return rewriter.notifyMatchFailure(op,
-                                         "does not write coalesced into LDS");
+    auto shape = dstTy.getShape();
+    LinearLayout srcLayout =
+        triton::gpu::toLinearLayout(shape, srcTy.getEncoding());
+    LinearLayout sharedLayout =
+        triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
+    LinearLayout srcToSharedLayout = srcLayout.invertAndCompose(sharedLayout);
+
+    StringAttr kLane = rewriter.getStringAttr("lane");
+    bool isSharedSwizzled = false;
+    for (int inLane : llvm::seq(srcToSharedLayout.getInDimSizeLog2(kLane))) {
+      auto basis = srcToSharedLayout.getBasis(kLane, inLane)[0];
+      unsigned expected = maxVec * (1 << inLane);
+      if (basis != expected) {
+        LDBG("detected uncoalesced layout from blocked to shared in async copy "
+             "for lane "
+             << 1 + inLane << "; given " << basis << " but expected "
+             << expected);
+        isSharedSwizzled = true;
+      }
     }
 
-    // Addresses to store into, one per `vecTy`.
-    VectorType vecTy;
-    SmallVector<Value> shmemAddrs;
-    bool ok = emitTransferBetweenRegistersAndShared(
-        srcTy, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
-        [&](VectorType vecTy_, Value shmemAddr) {
-          vecTy = vecTy_;
-          shmemAddrs.push_back(shmemAddr);
-        });
-    assert(ok);
+    if (isSharedSwizzled) {
+      dstTy.getEncoding().print(llvm::outs());
+      llvm::outs() << "BlockedToShared LL: \n"
+                   << srcToSharedLayout.toString() << "\n";
+      // Addresses to store into, one per `vecTy`.
+      VectorType vecTy;
+      SmallVector<Value> shmemAddrs;
+      bool ok = emitTransferBetweenRegistersAndShared(
+          srcTy, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+          [&](VectorType vecTy_, Value shmemAddr) {
+            vecTy = vecTy_;
+            shmemAddrs.push_back(shmemAddr);
+          });
+      assert(ok);
 
-    int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
-    if (!supportsLoadWidth(vecBits, targetInfo)) {
-      return rewriter.notifyMatchFailure(
-          op, "Async copy does not support the required load vectorization");
-    }
+      llvm::outs() << "Num shmemAddrs: " << shmemAddrs.size() << "\n";
+      llvm::outs() << "VecTy: ";
+      vecTy.print(llvm::outs());
+      llvm::outs() << "\n";
 
-    int vecBytes = vecBits / 8;
-    assert(llvm::isPowerOf2_32(vecBytes));
-    Value vecBytesVal = b.i32_val(vecBytes);
+      // We can only apply the trick if we do not swizzle across warp boundaries
+      // This means the lane dimensions has to be smaller than 2^lane_dim - 1
+      for (int inLane : llvm::seq(srcToSharedLayout.getInDimSizeLog2(kLane))) {
+        auto basis = srcToSharedLayout.getBasis(kLane, inLane)[0];
+        unsigned upperLimit = maxVec * ((1 << (inLane + 1)) - 1);
+        llvm::outs() << "Upper limit: " << inLane << "= " << upperLimit
+                     << " with basis= " << basis << "\n";
+        if (basis > upperLimit) {
+          LDBG("detected swizzling with crosses warp boundaries in async "
+               "copy "
+               "for lane "
+               << 1 + inLane << "; given " << basis
+               << " but should be smaller or equal to " << upperLimit);
+          assert("Swizzling across lane boundaries" && false);
+        }
+      }
 
-    Value cacheModifiers =
-        b.i32_val(mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
-            op.getCache(), /*isLoad=*/true, targetInfo));
+      int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
+      if (!supportsLoadWidth(vecBits, targetInfo)) {
+        return rewriter.notifyMatchFailure(
+            op, "Async copy does not support the required load vectorization");
+      }
 
-    Value llMask = adaptor.getMask();
-    SmallVector<Value> maskElems;
-    if (llMask) {
-      maskElems = unpackLLElements(loc, llMask, rewriter);
-      assert(srcElems.size() == maskElems.size());
-    }
+      int vecBytes = vecBits / 8;
+      assert(llvm::isPowerOf2_32(vecBytes));
+      Value vecBytesVal = b.i32_val(vecBytes);
 
-    SmallVector<Value> otherElems;
-    if (op.getOther()) {
-      otherElems = unpackLLElements(loc, adaptor.getOther(), rewriter);
-      assert(srcElems.size() == otherElems.size());
-    }
+      Value cacheModifiers =
+          b.i32_val(mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
+              op.getCache(), /*isLoad=*/true, targetInfo));
 
-    for (int i = 0; i < shmemAddrs.size(); i++) {
-      auto srcIdx = i * maxVec;
-      auto srcPtr = srcElems[srcIdx];
+      Value other = op.getOther();
+      SmallVector<Value> otherElems;
+      if (other) {
+        otherElems = unpackLLElements(loc, adaptor.getOther(), rewriter);
+        assert(srcElems.size() == otherElems.size());
+      }
 
-      if (maskElems.empty()) {
+      // The idea is to modify the dst layout to a colaseced one and instead
+      // move the swizzling to the src layout
+      auto sharedEncoding =
+          dyn_cast<SwizzledSharedEncodingAttr>(dstTy.getEncoding());
+      auto flattenDst = SwizzledSharedEncodingAttr::get(
+          op->getContext(), sharedEncoding.getVec(), 1, 1,
+          sharedEncoding.getOrder(), sharedEncoding.getCTALayout());
+      LinearLayout flattenDstLayout =
+          triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
+      LinearLayout srcToFlattenLayout =
+          srcLayout.invertAndCompose(sharedLayout);
+
+      VectorType flattenVecTy;
+      SmallVector<Value> flattenShmemAddrs;
+      auto flattenTy = triton::gpu::MemDescType::get(
+          dstTy.getShape(), dstTy.getElementType(), flattenDst,
+          dstTy.getMemorySpace());
+      llvm::outs() << "Flatten ty: ";
+      flattenTy.dump();
+      llvm::outs() << "\n";
+      ok = emitTransferBetweenRegistersAndShared(
+          srcTy, flattenTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+          [&](VectorType vecTy_, Value shmemAddr) {
+            flattenVecTy = vecTy_;
+            flattenShmemAddrs.push_back(shmemAddr);
+          });
+      assert(ok);
+
+      assert(flattenShmemAddrs.size() == shmemAddrs.size());
+      assert(flattenVecTy == vecTy);
+
+      for (int i = 0; i < shmemAddrs.size(); i++) {
+        auto srcIdx = i * maxVec;
+        auto srcPtr = srcElems[srcIdx];
+
+        // We need to modify srcPtr by the difference between the dstLayout
+        // and the flatteneddstLayout, we can take a shortcut by using the
+        // shmemAddresses
+        auto src1Ptr = b.ptrtoint(i32_ty, shmemAddrs[i]);
+        auto src2Ptr = b.ptrtoint(i32_ty, flattenShmemAddrs[i]);
+        int elementBytes = vecBytes / vecTy.getNumElements();
+        Value diff = b.sdiv(b.sub(src1Ptr, src2Ptr), b.i32_val(elementBytes));
+        Value diffAsFloat = b.inttofloat(f32_ty, diff);
+        auto newSrcPtr =
+            b.gep(srcPtr.getType(), dstTy.getElementType(), srcPtr, diff);
+
+        if (maskElements.empty()) {
+          llvm::outs() << "Ignore mask\n";
+          rewriter.create<ROCDL::GlobalLoadLDSOp>(
+              loc, newSrcPtr, flattenShmemAddrs[i], vecBytesVal,
+              /*offset=*/b.i32_val(0), cacheModifiers);
+          continue;
+        }
+
+        Block *currentBlock = rewriter.getInsertionBlock();
+        Block *afterLoad =
+            rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+        Block *loadBlock = rewriter.createBlock(afterLoad);
+        rewriter.setInsertionPointToEnd(currentBlock);
+        rewriter.create<LLVM::CondBrOp>(loc, maskElements[srcIdx], loadBlock,
+                                        afterLoad);
+        rewriter.setInsertionPointToStart(loadBlock);
+        rewriter.create<ROCDL::GlobalLoadLDSOp>(
+            loc, newSrcPtr, flattenShmemAddrs[i], vecBytesVal,
+            /*offset=*/b.i32_val(0), cacheModifiers);
+
+        rewriter.create<LLVM::BrOp>(loc, afterLoad);
+        rewriter.setInsertionPointToStart(afterLoad);
+        if (other) {
+          llvm::outs() << "Other with swizzle is not working!\n";
+          Value storeVal =
+              packElementRangeIntoVector(rewriter, this->getTypeConverter(),
+                                         loc, vecTy, otherElems, srcIdx);
+          llStore(rewriter, loc, flattenShmemAddrs[i], storeVal,
+                  b.icmp_ne(maskElements[srcIdx], b.true_val()), op.getCache());
+        }
+      }
+    } else {
+      // Addresses to store into, one per `vecTy`.
+      VectorType vecTy;
+      SmallVector<Value> shmemAddrs;
+      bool ok = emitTransferBetweenRegistersAndShared(
+          srcTy, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+          [&](VectorType vecTy_, Value shmemAddr) {
+            vecTy = vecTy_;
+            shmemAddrs.push_back(shmemAddr);
+          });
+      assert(ok);
+
+      int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
+      if (!supportsLoadWidth(vecBits, targetInfo)) {
+        return rewriter.notifyMatchFailure(
+            op, "Async copy does not support the required load vectorization");
+      }
+
+      int vecBytes = vecBits / 8;
+      assert(llvm::isPowerOf2_32(vecBytes));
+      Value vecBytesVal = b.i32_val(vecBytes);
+
+      Value cacheModifiers =
+          b.i32_val(mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
+              op.getCache(), /*isLoad=*/true, targetInfo));
+
+      Value other = op.getOther();
+      SmallVector<Value> otherElems;
+      if (other) {
+        otherElems = unpackLLElements(loc, adaptor.getOther(), rewriter);
+        assert(srcElems.size() == otherElems.size());
+      }
+
+      for (int i = 0; i < shmemAddrs.size(); i++) {
+        auto srcIdx = i * maxVec;
+        auto srcPtr = srcElems[srcIdx];
+
+        if (maskElements.empty()) {
+          rewriter.create<ROCDL::GlobalLoadLDSOp>(
+              loc, srcPtr, shmemAddrs[i], vecBytesVal,
+              /*offset=*/b.i32_val(0), cacheModifiers);
+          continue;
+        }
+
+        Block *currentBlock = rewriter.getInsertionBlock();
+        Block *afterLoad =
+            rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+        Block *loadBlock = rewriter.createBlock(afterLoad);
+        rewriter.setInsertionPointToEnd(currentBlock);
+        rewriter.create<LLVM::CondBrOp>(loc, maskElements[srcIdx], loadBlock,
+                                        afterLoad);
+        rewriter.setInsertionPointToStart(loadBlock);
         rewriter.create<ROCDL::GlobalLoadLDSOp>(
             loc, srcPtr, shmemAddrs[i], vecBytesVal, /*offset=*/b.i32_val(0),
             cacheModifiers);
-        continue;
-      }
 
-      Block *currentBlock = rewriter.getInsertionBlock();
-      Block *afterLoad =
-          rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
-      Block *loadBlock = rewriter.createBlock(afterLoad);
-      rewriter.setInsertionPointToEnd(currentBlock);
-      rewriter.create<LLVM::CondBrOp>(loc, maskElems[srcIdx], loadBlock,
-                                      afterLoad);
-      rewriter.setInsertionPointToStart(loadBlock);
-      rewriter.create<ROCDL::GlobalLoadLDSOp>(
-          loc, srcPtr, shmemAddrs[i], vecBytesVal, /*offset=*/b.i32_val(0),
-          cacheModifiers);
-
-      rewriter.create<LLVM::BrOp>(loc, afterLoad);
-      rewriter.setInsertionPointToStart(afterLoad);
-      if (!otherElems.empty()) {
-        Value storeVal = packElementRangeIntoVector(
-            rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
-        llStore(rewriter, loc, shmemAddrs[i], storeVal,
-                b.icmp_ne(maskElems[srcIdx], b.true_val()), op.getCache());
+        rewriter.create<LLVM::BrOp>(loc, afterLoad);
+        rewriter.setInsertionPointToStart(afterLoad);
+        if (!otherElems.empty()) {
+          Value storeVal =
+              packElementRangeIntoVector(rewriter, this->getTypeConverter(),
+                                         loc, vecTy, otherElems, srcIdx);
+          llStore(rewriter, loc, shmemAddrs[i], storeVal,
+                  b.icmp_ne(maskElements[srcIdx], b.true_val()), op.getCache());
+        }
       }
     }
 
@@ -825,7 +973,8 @@ struct BufferAtomicRMWOpConversion
     // only v2f16 and v2bf16.
     if (valueElemTy.isBF16() || valueElemTy.isF16()) {
       // We clamp to the only supported vectorization width here (2).
-      // In ConvertToBufferOps we check that we have a large enough vector size
+      // In ConvertToBufferOps we check that we have a large enough vector
+      // size
       assert(vec >= 2);
       vec = 2u;
       // The max width of a buffer atomic op is 64-bits
@@ -843,8 +992,9 @@ struct BufferAtomicRMWOpConversion
     SmallVector<Value> maskElems =
         getMaskElemsAndUpdateVeclen(rewriter, loc, llMask, mask, vec);
 
-    // We need to manually emit memory fences (LLVM doesn't do this for buffer
-    // ops) see: https://llvm.org/docs/AMDGPUUsage.html#memory-model-gfx942
+    // We need to manually emit memory fences (LLVM doesn't do this for
+    // buffer ops) see:
+    // https://llvm.org/docs/AMDGPUUsage.html#memory-model-gfx942
     auto memOrdering = op.getSem();
     auto atomicMemOrdering = getMemoryOrdering(memOrdering);
     auto rel = LLVM::AtomicOrdering::release;
@@ -915,49 +1065,54 @@ struct BufferAtomicRMWOpConversion
     // (MI300 series)
     // https://llvm.org/docs/AMDGPUUsage.html#memory-model-gfx942:
     //
-    // buffer/global/flat_load/store/atomic instructions to global memory are
-    // termed vector memory operations.
+    // buffer/global/flat_load/store/atomic instructions to global memory
+    // are termed vector memory operations.
     //
     // 1. Vector memory operations access a single vector L1 cache shared by
     // all SIMDs a CU.
-    //    No special action is required for coherence between wavefronts in the
-    //    same work-group since they execute on the same CU.
+    //    No special action is required for coherence between wavefronts in
+    //    the same work-group since they execute on the same CU.
     //
-    // 2. Each CU has a separate request queue per channel for its associated
-    // L2.
+    // 2. Each CU has a separate request queue per channel for its
+    // associated L2.
     //    Therefore, the vector and scalar memory operations performed by
-    //    wavefronts executing with different L1 caches and the same L2 cache
-    //    can be reordered relative to each other. A `s_waitcnt vmcnt(0)` is
-    //    required to ensure synchronization between vector memory operations of
-    //    different CUs. It ensures a previous vector memory operation has
-    //    completed before executing a subsequent vector memory or LDS operation
-    //    and so can be used to meet the requirements of acquire and release.
+    //    wavefronts executing with different L1 caches and the same L2
+    //    cache can be reordered relative to each other. A `s_waitcnt
+    //    vmcnt(0)` is required to ensure synchronization between vector
+    //    memory operations of different CUs. It ensures a previous vector
+    //    memory operation has completed before executing a subsequent
+    //    vector memory or LDS operation and so can be used to meet the
+    //    requirements of acquire and release.
     //
-    // 3. Atomic read-modify-write instructions implicitly bypass the L1 cache
+    // 3. Atomic read-modify-write instructions implicitly bypass the L1
+    // cache
     //    (specific to gfx942)
-    //    Therefore, they do not use the sc0 bit for coherence and instead use
-    //    it to indicate if the instruction returns the original value being
-    //    updated. They do use sc1 to indicate system or agent scope coherence.
-    //    See the cache modifiers word in BufferEmitter::fillCommonArgs for
-    //    more details.
+    //    Therefore, they do not use the sc0 bit for coherence and instead
+    //    use it to indicate if the instruction returns the original value
+    //    being updated. They do use sc1 to indicate system or agent scope
+    //    coherence. See the cache modifiers word in
+    //    BufferEmitter::fillCommonArgs for more details.
     //
     // In summary:
-    // 1. We have to emit memory fences (i.e., acq/rel/acq_rel) before and after
+    // 1. We have to emit memory fences (i.e., acq/rel/acq_rel) before and
+    // after
     //    our buffer atomics.
-    // 2. Because buffer atomic rmw ops skip the l1 cache, s_waitcnt vmcnt(0) is
+    // 2. Because buffer atomic rmw ops skip the l1 cache, s_waitcnt
+    // vmcnt(0) is
     //    sufficient for synchronization between instructions.
-    //    We don't need to invalidate L1 between these ops on GFX942, just after
-    //    (i.e., we can skip `buffer_wbinvl1_vol`)
+    //    We don't need to invalidate L1 between these ops on GFX942, just
+    //    after (i.e., we can skip `buffer_wbinvl1_vol`)
     // 3. We don't have to explicitly write to the l2 cache because
     //    `s_waitcnt vmcnt(0)` already does this as-per the MI300/CDNA3 ISA
-    //    docs: "Decremented for reads when the data has been written back to
-    //    the VGPRs, and for writes when the data has been written to the L2
-    //    cache. Ordering: Memory reads and writes return in the order they were
-    //    issued, including mixing reads and writes"
-    // 4. We set GLC=1, to return the old value. Atomics in GFX942 execute with
-    //    either device (default) or system scope (controlled by the sc1 flag).
-    //    This is distinct from the memory scope of the atomic (i.e, the memory
-    //    fences which appear before/after the ops).
+    //    docs: "Decremented for reads when the data has been written back
+    //    to the VGPRs, and for writes when the data has been written to the
+    //    L2 cache. Ordering: Memory reads and writes return in the order
+    //    they were issued, including mixing reads and writes"
+    // 4. We set GLC=1, to return the old value. Atomics in GFX942 execute
+    // with
+    //    either device (default) or system scope (controlled by the sc1
+    //    flag). This is distinct from the memory scope of the atomic (i.e,
+    //    the memory fences which appear before/after the ops).
 
     if (memScope == MemSyncScope::GPU) {
       waitcntBuilder.create<>("s_waitcnt vmcnt(0)")->operator()();
@@ -1179,7 +1334,8 @@ struct AtomicCASOpConversion
         auto *atomicBlock = rewriter.createBlock(
             curBlock->getParent(), std::next(Region::iterator(curBlock)));
 
-        // Fill entry block with global memory barrier and conditional branch.
+        // Fill entry block with global memory barrier and conditional
+        // branch.
         rewriter.setInsertionPointToEnd(curBlock);
         auto tid = getThreadId(rewriter, loc);
         Value pred = b.icmp_eq(tid, b.i32_val(i));
@@ -1406,8 +1562,8 @@ struct AtomicRMWOpConversion
     Type packF16Ty = vec_ty(valueElemTy, 2);
 
     // CDNA3/CDNA4 arch allows to accelerate its atomics with LDS reduction
-    // algorithm, which is only applicable for atomics with no return. Otherwise
-    // we have to deal with an additional overhead.
+    // algorithm, which is only applicable for atomics with no return.
+    // Otherwise we have to deal with an additional overhead.
     bool enableIntraWaveReduce =
         llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
                            targetInfo.getISAFamily()) &&
@@ -1420,18 +1576,20 @@ struct AtomicRMWOpConversion
     // accelerate atomics. Here is an algorithm of lowering
     // tt::atomicRmwOp(%ptr, %val, %mask):
     // 0. Group thread by pairs. Master thread is (tid % 2 == 0);
-    // 1. All the threads send %val to (tid - 1) thread via dppUpdateOp shl, so
+    // 1. All the threads send %val to (tid - 1) thread via dppUpdateOp shl,
+    // so
     //    all the masters recieve value from secondary threads;
     // 2. Take into account parity in the %mask value, build control flow
     //    structures according to it;
     // 3. Generate llvm::atomicRmwOp in the threads enabled by %mask value;
-    // 4. All the threads send result of generated operation to (tid + 1) thread
+    // 4. All the threads send result of generated operation to (tid + 1)
+    // thread
     //    via dppUpdateOp shl, so all secondary thread also recieve their
     //    result.
     //
-    // This approach enables us to use half the active threads committing atomic
-    // requests to avoid generating of code providing unified access to f16
-    // element and reduce contantion.
+    // This approach enables us to use half the active threads committing
+    // atomic requests to avoid generating of code providing unified access
+    // to f16 element and reduce contantion.
     bool useDppForPackedF16 = false;
     // tensor
     if (tensorTy) {
@@ -1439,8 +1597,8 @@ struct AtomicRMWOpConversion
       bool isF16Ty = valueElemTy.isF16() || valueElemTy.isBF16();
       unsigned availableVecSize = isF16Ty ? 2 : 1;
       vec = std::min<unsigned>(vec, availableVecSize);
-      // Force F16 packing  in the case it's not comming in as packed, but the
-      // ISA can support packed atomic instructions.
+      // Force F16 packing  in the case it's not comming in as packed, but
+      // the ISA can support packed atomic instructions.
       useDppForPackedF16 =
           supportsGlobalAtomicF16PackedAndDpp(targetInfo.getISAFamily()) &&
           vec == 1 && isF16Ty && atomicRmwAttr == RMWOp::FADD;
@@ -1538,8 +1696,8 @@ struct AtomicRMWOpConversion
       Value retVal = endBlock->getArgument(0);
       if (tensorTy) {
         if (useDppForPackedF16) {
-          // Return packed to i32 result after atomic operation back from master
-          // lane.
+          // Return packed to i32 result after atomic operation back from
+          // master lane.
           auto packedRet = b.bitcast(retVal, i32_ty);
           Value dppMovRes = shiftRightI32ByDpp(rewriter, packedRet);
           // Unpack results back
@@ -1585,21 +1743,22 @@ private:
                               LLVM::AtomicOrdering memOrdering,
                               StringRef scope) const {
     // This approach minimizes intra-warp thread contention when accessing
-    // global memory pointers. It is particularly advantageous for certain ISA
-    // families, such as CDNA3. The algorithm follows these steps:
+    // global memory pointers. It is particularly advantageous for certain
+    // ISA families, such as CDNA3. The algorithm follows these steps:
     // 1. Analyze thread groups and their relative positions:
     // 1.1. Consider groups of threads sharing identical pointers using
     //      `readfirstlane` and ballot `intrinsics`.
-    // 1.2. Compute parameters to form contiguous groups and further optimize
+    // 1.2. Compute parameters to form contiguous groups and further
+    // optimize
     //      them.
     // 1.3. Disable threads that have already been processed.
     // 1.4. If thread was not considered, jump to `1.1.`.
     // 2. Form contiguous groups:
-    //    Use `permute` instructions to organize threads within the wavefront
-    //    into continuous groups.
+    //    Use `permute` instructions to organize threads within the
+    //    wavefront into continuous groups.
     // 4. Reduce Groups to Leader threads:
-    //    Apply `bpermute` and operation-specific arithmetic based on the opKind
-    //    to consolidate group data into leader threads.
+    //    Apply `bpermute` and operation-specific arithmetic based on the
+    //    opKind to consolidate group data into leader threads.
     // 5. Perform global atomic operations by leader threads.
     auto loc = operand.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -1621,15 +1780,16 @@ private:
 
     // Greed search of same addr within wavefront. Also collect auxiliary
     // information about relative position:
-    // - idx in a group + base laneId. This param is required to form continuous
+    // - idx in a group + base laneId. This param is required to form
+    // continuous
     //   groups further;
     // - cnt of remaining threads in a group after current thread;
     // - leadership status of the current thread.
     rewriter.setInsertionPointToEnd(loopBody);
     // `readfirstlane` considers only enabled threads
     Value chosen = genI32TiledOp(rewriter, genReadFirstLane, rmwPtr);
-    // this flag is required to disable thread if we have already checked its
-    // pointer
+    // this flag is required to disable thread if we have already checked
+    // its pointer
     Value done = b.icmp_eq(chosen, rmwPtr);
     Value mask = targetInfo.ballot(rewriter, loc, i64_ty, done);
     Value start = loopBody->getArgument(0);
@@ -1785,18 +1945,19 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
     // global.load.lds uses vmcnt to synchronize
-    // The rocdl op stores all available counters in a single int32 value (v).
-    // The vmcnt (6 bits) is split into a lower 3:0 and higher 5:4 parts.
-    // The lower part is stored in bits 3:0 of v and the higher part in bits
-    // 15:14. We have to set all other bits in v to 1 to signal we are not
-    // interested in those.
+    // The rocdl op stores all available counters in a single int32 value
+    // (v). The vmcnt (6 bits) is split into a lower 3:0 and higher 5:4
+    // parts. The lower part is stored in bits 3:0 of v and the higher part
+    // in bits 15:14. We have to set all other bits in v to 1 to signal we
+    // are not interested in those.
 
     int vmCnt = op.getNum();
     if (vmCnt >= 64) {
       return emitError(loc, "AsyncWait does not support values >= 64");
     }
 
-    // Extract low and high bits and combine while setting all other bits to 1
+    // Extract low and high bits and combine while setting all other bits to
+    // 1
     unsigned lowBits = vmCnt & 0xF;
     unsigned highBits = vmCnt >> 4 << 14;
     unsigned otherCnts = ~0xC00F; // C00F has bits 15:14 and 3:0 set

@@ -299,9 +299,9 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
   assert(srcTy);
   bool useAsyncCopy = false;
   if (triton::tools::getBoolEnv("AMDGCN_USE_ASYNC_COPY") &&
-      sharedEncodingAttr.getOrder().size() == 2 &&
-      sharedEncodingAttr.getPerPhase() == 1 &&
-      sharedEncodingAttr.getMaxPhase() == 1 &&
+      // sharedEncodingAttr.getOrder().size() == 2 &&
+      // sharedEncodingAttr.getPerPhase() == 1 &&
+      // sharedEncodingAttr.getMaxPhase() == 1 &&
       llvm::equal(sharedEncodingAttr.getOrder(),
                   ttg::getOrder(srcTy.getEncoding()))) {
     useAsyncCopy = true;
