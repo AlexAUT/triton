@@ -529,88 +529,220 @@ struct AsyncCopyGlobalToLocalOpConversion
     auto maskElements = getMaskElemsAndUpdateVeclen(
         rewriter, loc, adaptor.getMask(), op.getMask(), maxVec);
 
-    // global.load.lds does not support per lane offsets.
-    // We need to ensure that we write coalesced into shared memory. This means
-    // that the kLane dim needs to be contigeous based on the vector size.
-    if (!LLVM::AMD::canCoalesceWriteIntoSharedMemory(rewriter, srcTy, dstTy,
-                                                     maxVec)) {
-      return rewriter.notifyMatchFailure(op,
-                                         "does not write coalesced into LDS");
-    }
-
-    // First we determine the vector size per load and collect the
-    // shared addresses. This will only emit the address calculation and not the
-    // actual loads
-    VectorType vecTy;
-    SmallVector<Value> shmemAddrs;
-    bool ok = emitTransferBetweenRegistersAndShared(
-        srcTy, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
-        [&](VectorType vecTy_, Value shmemAddr) {
-          vecTy = vecTy_;
-          shmemAddrs.push_back(shmemAddr);
-        });
-    assert(ok);
-
-    int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
-    if (!targetInfo.supportsDirectToLdsLoadBitWidth(vecBits)) {
-      return rewriter.notifyMatchFailure(
-          op, "Async copy does not support the required load vector bitwidth" +
-                  std::to_string(vecBits));
-    }
-
-    int vecBytes = vecBits / 8;
-    assert(llvm::isPowerOf2_32(vecBytes));
-    Value vecBytesVal = b.i32_val(vecBytes);
-
-    Value cacheModifiers =
-        b.i32_val(mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
-            op.getCache(), /*isLoad=*/true, targetInfo));
-
-    Value llMask = adaptor.getMask();
-    SmallVector<Value> maskElems;
-    if (llMask) {
-      maskElems = unpackLLElements(loc, llMask, rewriter);
-      assert(srcElems.size() == maskElems.size());
-    }
-
+    Value other = op.getOther();
     SmallVector<Value> otherElems;
-    if (op.getOther()) {
+    if (other) {
       otherElems = unpackLLElements(loc, adaptor.getOther(), rewriter);
       assert(srcElems.size() == otherElems.size());
     }
 
-    // Emit the load to lds based on the collected shared addresses and vector
-    // size
-    for (int i = 0; i < shmemAddrs.size(); i++) {
-      auto srcIdx = i * maxVec;
-      auto srcPtr = srcElems[srcIdx];
+    // global.load.lds does not support per lane offsets.
+    // We need to ensure that we write coalesced into shared memory. This means
+    // that the kLane dim needs to be contigeous based on the vector size.
+    bool isSharedSwizzled = false;
+    if (!LLVM::AMD::canCoalesceWriteIntoSharedMemory(rewriter, srcTy, dstTy,
+                                                     maxVec)) {
+      isSharedSwizzled = true;
+      // return rewriter.notifyMatchFailure(op,
+      //                                    "does not write coalesced into
+      //                                    LDS");
+    }
+    auto shape = dstTy.getShape();
+    LinearLayout srcLayout =
+        triton::gpu::toLinearLayout(shape, srcTy.getEncoding());
+    LinearLayout sharedLayout =
+        triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
+    LinearLayout srcToSharedLayout = srcLayout.invertAndCompose(sharedLayout);
 
-      if (maskElems.empty()) {
+    if (isSharedSwizzled) {
+      dstTy.getEncoding().print(llvm::outs());
+      llvm::outs() << "BlockedToShared LL: \n"
+                   << srcToSharedLayout.toString() << "\n";
+      // First we determine the vector size per load and collect the
+      // shared addresses. This will only emit the address calculation and not
+      // the actual loads
+      VectorType vecTy;
+      SmallVector<Value> shmemAddrs;
+      bool ok = emitTransferBetweenRegistersAndShared(
+          srcTy, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+          [&](VectorType vecTy_, Value shmemAddr) {
+            vecTy = vecTy_;
+            shmemAddrs.push_back(shmemAddr);
+          });
+      assert(ok);
+
+      int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
+      if (!targetInfo.supportsDirectToLdsLoadBitWidth(vecBits)) {
+        return rewriter.notifyMatchFailure(
+            op,
+            "Async copy does not support the required load vector bitwidth" +
+                std::to_string(vecBits));
+      }
+
+      // We can only apply the trick if we do not swizzle across warp boundaries
+      // This means the lane dimensions has to be smaller than 2^lane_dim - 1
+      StringAttr kLane = rewriter.getStringAttr("lane");
+      for (int inLane : llvm::seq(srcToSharedLayout.getInDimSizeLog2(kLane))) {
+        auto basis = srcToSharedLayout.getBasis(kLane, inLane)[0];
+        unsigned upperLimit = maxVec * ((1 << (inLane + 1)) - 1);
+        llvm::outs() << "Upper limit: " << inLane << "= " << upperLimit
+                     << " with basis= " << basis << "\n";
+        if (basis > upperLimit) {
+          LDBG("detected swizzling with crosses warp boundaries in async "
+               "copy "
+               "for lane "
+               << 1 + inLane << "; given " << basis
+               << " but should be smaller or equal to " << upperLimit);
+          assert("Swizzling across lane boundaries" && false);
+        }
+      }
+
+      int vecBytes = vecBits / 8;
+      assert(llvm::isPowerOf2_32(vecBytes));
+      Value vecBytesVal = b.i32_val(vecBytes);
+
+      Value cacheModifiers =
+          b.i32_val(mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
+              op.getCache(), /*isLoad=*/true, targetInfo));
+
+      // The idea is to modify the dst layout to a colaseced one and instead
+      // move the swizzling to the src layout
+      auto sharedEncoding =
+          dyn_cast<SwizzledSharedEncodingAttr>(dstTy.getEncoding());
+      auto flattenDst = SwizzledSharedEncodingAttr::get(
+          op->getContext(), sharedEncoding.getVec(), 1, 1,
+          sharedEncoding.getOrder(), sharedEncoding.getCTALayout());
+      LinearLayout flattenDstLayout =
+          triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
+      LinearLayout srcToFlattenLayout =
+          srcLayout.invertAndCompose(sharedLayout);
+
+      VectorType flattenVecTy;
+      SmallVector<Value> flattenShmemAddrs;
+      auto flattenTy = triton::gpu::MemDescType::get(
+          dstTy.getShape(), dstTy.getElementType(), flattenDst,
+          dstTy.getMemorySpace());
+      llvm::outs() << "Flatten ty: ";
+      flattenTy.dump();
+      llvm::outs() << "\n";
+      ok = emitTransferBetweenRegistersAndShared(
+          srcTy, flattenTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+          [&](VectorType vecTy_, Value shmemAddr) {
+            flattenVecTy = vecTy_;
+            flattenShmemAddrs.push_back(shmemAddr);
+          });
+      assert(ok);
+
+      assert(flattenShmemAddrs.size() == shmemAddrs.size());
+      assert(flattenVecTy == vecTy);
+
+      // Emit the load to lds based on the collected shared addresses and vector
+      // size
+      for (int i = 0; i < shmemAddrs.size(); i++) {
+        auto srcIdx = i * maxVec;
+        auto srcPtr = srcElems[srcIdx];
+
+        // We need to modify srcPtr by the difference between the dstLayout
+        // and the flatteneddstLayout, we can take a shortcut by using the
+        // shmemAddresses
+        auto src1Ptr = b.ptrtoint(i32_ty, shmemAddrs[i]);
+        auto src2Ptr = b.ptrtoint(i32_ty, flattenShmemAddrs[i]);
+        int elementBytes = vecBytes / vecTy.getNumElements();
+        Value diff = b.sdiv(b.sub(src1Ptr, src2Ptr), b.i32_val(elementBytes));
+        Value diffAsFloat = b.inttofloat(f32_ty, diff);
+        auto newSrcPtr =
+            b.gep(srcPtr.getType(), dstTy.getElementType(), srcPtr, diff);
+
+        if (maskElements.empty()) {
+          llvm::outs() << "Ignore mask\n";
+          rewriter.create<ROCDL::GlobalLoadLDSOp>(
+              loc, newSrcPtr, flattenShmemAddrs[i], vecBytesVal,
+              /*offset=*/b.i32_val(0), cacheModifiers);
+          continue;
+        }
+
+        Block *currentBlock = rewriter.getInsertionBlock();
+        Block *afterLoad =
+            rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+        Block *loadBlock = rewriter.createBlock(afterLoad);
+        rewriter.setInsertionPointToEnd(currentBlock);
+        rewriter.create<LLVM::CondBrOp>(loc, maskElements[srcIdx], loadBlock,
+                                        afterLoad);
+        rewriter.setInsertionPointToStart(loadBlock);
+        rewriter.create<ROCDL::GlobalLoadLDSOp>(
+            loc, newSrcPtr, flattenShmemAddrs[i], vecBytesVal,
+            /*offset=*/b.i32_val(0), cacheModifiers);
+
+        rewriter.create<LLVM::BrOp>(loc, afterLoad);
+        rewriter.setInsertionPointToStart(afterLoad);
+        if (!otherElems.empty()) {
+          Value storeVal =
+              packElementRangeIntoVector(rewriter, this->getTypeConverter(),
+                                         loc, vecTy, otherElems, srcIdx);
+          llStore(rewriter, loc, shmemAddrs[i], storeVal,
+                  b.icmp_ne(maskElements[srcIdx], b.true_val()), op.getCache());
+        }
+      }
+    } else {
+      // Addresses to store into, one per `vecTy`.
+      VectorType vecTy;
+      SmallVector<Value> shmemAddrs;
+      bool ok = emitTransferBetweenRegistersAndShared(
+          srcTy, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+          [&](VectorType vecTy_, Value shmemAddr) {
+            vecTy = vecTy_;
+            shmemAddrs.push_back(shmemAddr);
+          });
+      assert(ok);
+
+      int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
+      if (!targetInfo.supportsDirectToLdsLoadBitWidth(vecBits)) {
+        return rewriter.notifyMatchFailure(
+            op,
+            "Async copy does not support the required load vector bitwidth" +
+                std::to_string(vecBits));
+      }
+
+      int vecBytes = vecBits / 8;
+      assert(llvm::isPowerOf2_32(vecBytes));
+      Value vecBytesVal = b.i32_val(vecBytes);
+
+      Value cacheModifiers =
+          b.i32_val(mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
+              op.getCache(), /*isLoad=*/true, targetInfo));
+
+      for (int i = 0; i < shmemAddrs.size(); i++) {
+        auto srcIdx = i * maxVec;
+        auto srcPtr = srcElems[srcIdx];
+
+        if (maskElements.empty()) {
+          rewriter.create<ROCDL::GlobalLoadLDSOp>(
+              loc, srcPtr, shmemAddrs[i], vecBytesVal,
+              /*offset=*/b.i32_val(0), cacheModifiers);
+          continue;
+        }
+
+        Block *currentBlock = rewriter.getInsertionBlock();
+        Block *afterLoad =
+            rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+        Block *loadBlock = rewriter.createBlock(afterLoad);
+        rewriter.setInsertionPointToEnd(currentBlock);
+        rewriter.create<LLVM::CondBrOp>(loc, maskElements[srcIdx], loadBlock,
+                                        afterLoad);
+        rewriter.setInsertionPointToStart(loadBlock);
         rewriter.create<ROCDL::GlobalLoadLDSOp>(
             loc, srcPtr, shmemAddrs[i], vecBytesVal, /*offset=*/b.i32_val(0),
             cacheModifiers);
-        continue;
-      }
 
-      Block *currentBlock = rewriter.getInsertionBlock();
-      Block *afterLoad =
-          rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
-      Block *loadBlock = rewriter.createBlock(afterLoad);
-      rewriter.setInsertionPointToEnd(currentBlock);
-      rewriter.create<LLVM::CondBrOp>(loc, maskElems[srcIdx], loadBlock,
-                                      afterLoad);
-      rewriter.setInsertionPointToStart(loadBlock);
-      rewriter.create<ROCDL::GlobalLoadLDSOp>(
-          loc, srcPtr, shmemAddrs[i], vecBytesVal, /*offset=*/b.i32_val(0),
-          cacheModifiers);
-
-      rewriter.create<LLVM::BrOp>(loc, afterLoad);
-      rewriter.setInsertionPointToStart(afterLoad);
-      if (!otherElems.empty()) {
-        Value storeVal = packElementRangeIntoVector(
-            rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
-        llStore(rewriter, loc, shmemAddrs[i], storeVal,
-                b.icmp_ne(maskElems[srcIdx], b.true_val()), op.getCache());
+        rewriter.create<LLVM::BrOp>(loc, afterLoad);
+        rewriter.setInsertionPointToStart(afterLoad);
+        if (!otherElems.empty()) {
+          Value storeVal =
+              packElementRangeIntoVector(rewriter, this->getTypeConverter(),
+                                         loc, vecTy, otherElems, srcIdx);
+          llStore(rewriter, loc, shmemAddrs[i], storeVal,
+                  b.icmp_ne(maskElements[srcIdx], b.true_val()), op.getCache());
+        }
       }
     }
 
