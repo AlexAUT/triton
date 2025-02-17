@@ -262,17 +262,12 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
   auto sharedEncodingAttr =
       cast<ttg::SwizzledSharedEncodingAttr>(allocTy.getEncoding());
 
-  bool useAsyncCopy = false;
-
   auto srcTy = dyn_cast<triton::gpu::TensorOrMemDesc>(src.getType());
   assert(srcTy);
-  if (triton::tools::getBoolEnv("AMDGCN_USE_ASYNC_COPY") &&
-      // sharedEncodingAttr.getOrder().size() == 2 &&
-      // sharedEncodingAttr.getPerPhase() == 1 &&
-      // sharedEncodingAttr.getMaxPhase() == 1 &&
-      llvm::equal(sharedEncodingAttr.getOrder(),
-                  ttg::getOrder(srcTy.getEncoding()))) {
-    useAsyncCopy = true;
+  bool useAsyncCopy = triton::tools::getBoolEnv("AMDGCN_USE_ASYNC_COPY") &&
+                      llvm::equal(sharedEncodingAttr.getOrder(),
+                                  ttg::getOrder(srcTy.getEncoding()));
+  if (useAsyncCopy) {
     LDBG("Emit async copy for: " << *loadOp);
     LDBG("Shared encoding: " << sharedEncodingAttr);
   }
@@ -309,53 +304,15 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
 
   Operation *wait{};
   if (useAsyncCopy) {
-    auto shape = subviewTy.getShape();
-    auto order = sharedEncodingAttr.getOrder();
-
-    llvm::SmallVector<unsigned, 2> sizePerThread{1, 1};
-    unsigned bitsPerLoad = 32; // FIXME: make this target/type dependent
-    sizePerThread[order[0]] =
-        bitsPerLoad / allocTy.getElementType().getIntOrFloatBitWidth();
-    llvm::SmallVector<unsigned, 2> threadsPerWarp{1, 1};
-    assert((shape[order[0]] & sizePerThread[0]) == 0);
-    unsigned warpSize = 64; // FIXME: make this adjustable
-    threadsPerWarp[order[0]] =
-        std::min<unsigned>(warpSize, shape[order[0]] / sizePerThread[order[0]]);
-    threadsPerWarp[order[1]] =
-        std::max<unsigned>(1, warpSize / threadsPerWarp[order[0]]);
-
-    auto srcEncoding = srcTy.getEncoding();
-    auto newLayout = ttg::BlockedEncodingAttr::get(
-        loadOp->getContext(), sizePerThread, threadsPerWarp,
-        ttg::getWarpsPerCTA(srcEncoding), ttg::getOrder(srcEncoding),
-        ttg::getCTALayout(srcEncoding));
-
-    RankedTensorType newSrcTy = RankedTensorType::get(
-        srcTy.getShape(), srcTy.getElementType(), newLayout);
-    auto cvtSrc =
-        builder.create<ttg::ConvertLayoutOp>(loadOp.getLoc(), newSrcTy, src);
-
     auto [stage, cluster] = schedule[loadOp];
-    auto mask = loadOp.getMask();
-    if (mask) {
-      auto maskTy = dyn_cast<triton::gpu::TensorOrMemDesc>(mask.getType());
-      assert(maskTy);
-      RankedTensorType newMaskTy = RankedTensorType::get(
-          maskTy.getShape(), maskTy.getElementType(), newLayout);
-      auto cvtMask = builder.create<ttg::ConvertLayoutOp>(loadOp->getLoc(),
-                                                          newMaskTy, mask);
-      mask = cvtMask;
-      schedule.insert(cvtMask, stage, cluster);
-    }
 
     newLoadOp = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
-        loadOp.getLoc(), cvtSrc.getResult(), viewLoad, mask, other,
+        loadOp.getLoc(), src, viewLoad, loadOp.getMask(), loadOp.getOther(),
         loadOp.getCache(), loadOp.getEvict(), loadOp.getIsVolatile());
 
     wait = builder.create<ttg::AsyncWaitOp>(loc, newLoadOp->getResult(0), 0);
 
     schedule.erase(loadOp);
-    schedule.insert(cvtSrc, stage, cluster);
     schedule.insert(newLoadOp, stage, cluster);
   }
 

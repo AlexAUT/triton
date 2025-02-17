@@ -220,6 +220,7 @@ class HIPBackend(BaseBackend):
                                              "please update to use num_stages == 2 for "
                                              "equivalent behavior in the past.")
             amd.passes.ttgpuir.add_stream_pipeline(pm, options.num_stages, stream_prefetch)
+            amd.passes.ttgpuir.add_coalesce_async_copy(pm, options.arch)
             passes.common.add_canonicalizer(pm)
         if options.instruction_sched_variant.lower() != "none":
             amd.passes.ttgpuir.insert_instruction_sched_hints(pm, options.instruction_sched_variant)
@@ -364,6 +365,8 @@ class HIPBackend(BaseBackend):
         if os.environ.get("AMDGCN_ENABLE_DUMP", "0") == "1":
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)
+        with open("out.amdgcn", "w") as f:
+            f.write(amdgcn)
         return amdgcn
 
     @staticmethod

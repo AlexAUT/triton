@@ -145,4 +145,23 @@ def TritonAMDGPUBlockPingpong: Pass<"tritonamdgpu-block-pingpong", "mlir::Module
   let dependentDialects = ["mlir::ROCDL::ROCDLDialect, mlir::triton::amdgpu::TritonAMDGPUDialect"];
 }
 
+def TritonAMDGPUCoalesceAsyncCopy: Pass<"tritonamdgpu-coalesce-async-copy", "mlir::ModuleOp"> {
+  let summary = "Adjusts layout of async copy to have coalesced writes";
+
+  let description = [{
+    This pass alters the src layout of Async Copy Ops to ensure coalesced writes into LDS as required by the
+    global.load.lds instructions on GFX9.
+  }];
+
+  let constructor = "mlir::createTritonAMDGPUCoalesceAsyncCopy()";
+
+  let dependentDialects = [];
+
+  let options = [
+    Option<"archGenerationName", "arch-generation-name",
+           "std::string", /*default=*/"std::string{}",
+           "GFX generation name of target device.">,
+  ];
+}
+
 #endif

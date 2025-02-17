@@ -489,9 +489,6 @@ struct AsyncCopyGlobalToLocalOpConversion
     }
 
     if (isSharedSwizzled) {
-      dstTy.getEncoding().print(llvm::outs());
-      llvm::outs() << "BlockedToShared LL: \n"
-                   << srcToSharedLayout.toString() << "\n";
       // Addresses to store into, one per `vecTy`.
       VectorType vecTy;
       SmallVector<Value> shmemAddrs;
@@ -503,18 +500,13 @@ struct AsyncCopyGlobalToLocalOpConversion
           });
       assert(ok);
 
-      llvm::outs() << "Num shmemAddrs: " << shmemAddrs.size() << "\n";
-      llvm::outs() << "VecTy: ";
       vecTy.print(llvm::outs());
-      llvm::outs() << "\n";
 
       // We can only apply the trick if we do not swizzle across warp boundaries
       // This means the lane dimensions has to be smaller than 2^lane_dim - 1
       for (int inLane : llvm::seq(srcToSharedLayout.getInDimSizeLog2(kLane))) {
         auto basis = srcToSharedLayout.getBasis(kLane, inLane)[0];
         unsigned upperLimit = maxVec * ((1 << (inLane + 1)) - 1);
-        llvm::outs() << "Upper limit: " << inLane << "= " << upperLimit
-                     << " with basis= " << basis << "\n";
         if (basis > upperLimit) {
           LDBG("detected swizzling with crosses warp boundaries in async "
                "copy "
@@ -570,9 +562,7 @@ struct AsyncCopyGlobalToLocalOpConversion
       auto flattenTy = triton::gpu::MemDescType::get(
           dstTy.getShape(), dstTy.getElementType(), flattenDst,
           dstTy.getMemorySpace());
-      llvm::outs() << "Flatten ty: ";
       flattenTy.dump();
-      llvm::outs() << "\n";
       ok = emitTransferBetweenRegistersAndShared(
           srcTy, flattenTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
           [&](VectorType vecTy_, Value shmemAddr) {
@@ -600,7 +590,6 @@ struct AsyncCopyGlobalToLocalOpConversion
             b.gep(srcPtr.getType(), dstTy.getElementType(), srcPtr, diff);
 
         if (!mask) {
-          llvm::outs() << "Ignore mask\n";
           rewriter.create<ROCDL::GlobalLoadLDSOp>(
               loc, newSrcPtr, flattenShmemAddrs[i], vecBytesVal,
               /*offset=*/b.i32_val(0), cacheModifiers);
@@ -622,7 +611,6 @@ struct AsyncCopyGlobalToLocalOpConversion
         rewriter.create<LLVM::BrOp>(loc, afterLoad);
         rewriter.setInsertionPointToStart(afterLoad);
         if (other) {
-          llvm::outs() << "Other with swizzle is not working!\n";
           Value storeVal =
               packElementRangeIntoVector(rewriter, this->getTypeConverter(),
                                          loc, vecTy, otherElems, srcIdx);
