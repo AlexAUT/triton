@@ -6,6 +6,7 @@ from types import ModuleType
 import hashlib
 import tempfile
 import os
+import sys
 import re
 import subprocess
 import functools
@@ -362,8 +363,13 @@ class HIPBackend(BaseBackend):
         # llvm -> hsaco
         amdgcn = llvm.translate_to_asm(src, amd.TARGET_TRIPLE, options.arch, '', [], options.enable_fp_fusion, False)
         if os.environ.get("AMDGCN_ENABLE_DUMP", "0") == "1":
-            print("// -----// AMDGCN Dump //----- //")
-            print(amdgcn)
+            out_file = sys.stdout
+            dump_path = os.environ.get("AMDGCN_DUMP_PATH")
+            if dump_path:
+                Path(dump_path).parent.mkdir(parents=True, exist_ok=True)
+                out_file = open(dump_path, "w")
+            print("// -----// AMDGCN Dump //----- //", file=out_file)
+            print(amdgcn, file=out_file)
         return amdgcn
 
     @staticmethod
