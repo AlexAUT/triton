@@ -40,6 +40,7 @@
 
 using namespace mlir;
 namespace tt = triton;
+namespace ttg = triton::gpu;
 
 // -----------------------------------------------------------------------------
 // Pointer canonicalizer utility class
@@ -1091,9 +1092,14 @@ public:
           adaptor,
       ConversionPatternRewriter &rewriter) const override {
     if (!llvm::isa<tt::PointerType>(
-            getElementTypeOrSelf(op->getOperandTypes()[PtrLikeIdx])))
+            getElementTypeOrSelf(op->getOperandTypes()[PtrLikeIdx]))) {
+      llvm::outs() << "Not a ptr like: ";
+      op->print(llvm::outs());
+      llvm::outs() << "\n";
+      llvm::outs().flush();
       return rewriter.notifyMatchFailure(op,
                                          "expected operand to be pointer-like");
+    }
     ValueRange fatPtr = adaptor.getOperands()[PtrLikeIdx];
     if (fatPtr.size() != 2) {
       // some prior op materialized the fat ptr, e.g.:
@@ -1112,12 +1118,20 @@ public:
     operands[PtrLikeIdx] = createTensorPointer(
         rewriter, fatPtrBase, fatPtrOffset, curLoc, fatPtrAttrs);
 
+    llvm::outs() << "Before materialization: ";
+    op->print(llvm::outs());
+    llvm::outs() << "\n";
+    llvm::outs().flush();
     if (op->getNumResults())
-      rewriter.replaceOpWithNewOp<SourceOp>(
+      op = rewriter.replaceOpWithNewOp<SourceOp>(
           op, op->getResultTypes(), ValueRange{operands}, op->getAttrs());
     else
-      rewriter.replaceOpWithNewOp<SourceOp>(
+      op = rewriter.replaceOpWithNewOp<SourceOp>(
           op, TypeRange{}, ValueRange{operands}, op->getAttrs());
+    llvm::outs() << "Materialize for: ";
+    op->print(llvm::outs());
+    llvm::outs() << "\n";
+    llvm::outs().flush();
     return success();
   }
 };
@@ -1437,6 +1451,7 @@ void TritonAMDGPUCanonicalizePointersPass::runOnOperation() {
   };
 
   target.addDynamicallyLegalDialect<tt::TritonDialect>(isLegal);
+  target.addDynamicallyLegalDialect<triton::gpu::TritonGPUDialect>(isLegal);
   target.addDynamicallyLegalDialect<scf::SCFDialect>(isLegal);
   target.addDynamicallyLegalDialect<cf::ControlFlowDialect>(isLegal);
   target.addDynamicallyLegalDialect<arith::ArithDialect>(isLegal);
@@ -1454,6 +1469,7 @@ void TritonAMDGPUCanonicalizePointersPass::runOnOperation() {
       ConvertAddPtrOp, MaterializeFatPointer<tt::AtomicCASOp>,
       MaterializeFatPointer<tt::AtomicRMWOp>,
       MaterializeFatPointer<tt::BitcastOp>, MaterializeFatPointer<tt::LoadOp>,
+      MaterializeFatPointer<ttg::AsyncCopyGlobalToLocalOp>,
       MaterializeFatPointer<tt::PtrToIntOp>, MaterializeFatPointer<tt::StoreOp>,
       MaterializeFatPointerVariadic<tt::CallOp>,
       MaterializeFatPointerVariadic<tt::PrintOp>, ConvertSCFForOp,

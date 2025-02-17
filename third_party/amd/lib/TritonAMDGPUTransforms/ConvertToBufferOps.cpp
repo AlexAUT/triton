@@ -734,6 +734,61 @@ private:
   DenseSet<Value> assumptions;
 };
 
+struct ConvertAsyncCopyGlobalToLocalToBufferLoad
+    : public mlir::OpRewritePattern<triton::gpu::AsyncCopyGlobalToLocalOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  ConvertAsyncCopyGlobalToLocalToBufferLoad(mlir::MLIRContext *context,
+                                            DenseSet<Value> &assumptions)
+      : mlir::OpRewritePattern<triton::gpu::AsyncCopyGlobalToLocalOp>(context),
+        assumptions(assumptions) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(triton::gpu::AsyncCopyGlobalToLocalOp op,
+                  PatternRewriter &rewriter) const override {
+    LDBG("Try to convert: " << op);
+    Value ptr = op.getSrc();
+
+    if (canUseBufferOps(ptr, assumptions)) {
+      auto addPtrOp = ptr.getDefiningOp<triton::AddPtrOp>();
+      Value tensorPtr = addPtrOp.getPtr();
+      Value tensorOffset = addPtrOp.getOffset();
+      auto splatOp = tensorPtr.getDefiningOp<triton::SplatOp>();
+      Value basePtr = splatOp.getSrc();
+      Value maybeOther{};
+      if (op.getOther() && !isZeroConst(op.getOther()))
+        maybeOther = op.getOther();
+      Value maybeMask{};
+      if (op.getMask() && !isZeroConst(op.getMask()))
+        maybeMask = op.getMask();
+      Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
+      auto bufferLoadOp = rewriter.create<triton::amdgpu::BufferLoadToLocalOp>(
+          op->getLoc(), op.getType(), basePtr, tensorOffset, op.getResult(),
+          blockStride, op.getCache(), maybeMask, maybeOther);
+
+      // Propagate `OpIdxAttr` if the currently processed `tt.LoadOp` was
+      // labeled it. The attribute needs to be preserved for custom instruction
+      // scheduling.
+      if (auto opIdxAttr = op->getAttrOfType<triton::amdgpu::OpIdxAttr>(
+              triton::amdgpu::OpIdxAttr::getMnemonic())) {
+        bufferLoadOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(),
+                              opIdxAttr);
+      }
+      llvm::outs() << "REPLACE!!!!!!!!!!!\n";
+      llvm::outs().flush();
+      rewriter.replaceOp(op, bufferLoadOp);
+      return success();
+    }
+
+    LDBG("Failed to convert: " << op);
+    return rewriter.notifyMatchFailure(op, "Failed to convert LoadOp");
+  }
+
+private:
+  // Assumptions collected through the function
+  DenseSet<Value> assumptions;
+};
+
 struct ConvertTritonStoreToBufferStore
     : public mlir::OpRewritePattern<triton::StoreOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -808,6 +863,8 @@ public:
 
     ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
     patterns.add<ConvertTritonLoadToBufferLoad>(context, assumptions);
+    patterns.add<ConvertAsyncCopyGlobalToLocalToBufferLoad>(context,
+                                                            assumptions);
     patterns.add<ConvertTritonStoreToBufferStore>(context, assumptions);
 
     // Gate buffer atomics behind CDNA3 (i.e., MI300 series) for now

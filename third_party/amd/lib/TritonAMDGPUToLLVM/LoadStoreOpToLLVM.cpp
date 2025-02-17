@@ -27,6 +27,21 @@ using ::mlir::triton::AMD::ISAFamily;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 
 namespace {
+bool supportsLoadWidth(unsigned bits, const AMD::TargetInfo &targetInfo) const {
+  switch (targetInfo.getISAFamily()) {
+  case ISAFamily::CDNA1:
+  case ISAFamily::CDNA2:
+  case ISAFamily::CDNA3:
+    return llvm::is_contained({32, 16, 8}, bits);
+  case ISAFamily::CDNA4:
+    return llvm::is_contained({128, 96, 32, 16, 8}, bits);
+  default:
+    break;
+  }
+
+  return false;
+}
+
 // Return the mask for the unique data accessed by given tensor type.
 // Used to mask out the redundant data accessed by threads.
 Value redundantDataMask(Type valueTy, ConversionPatternRewriter &rewriter,
@@ -397,6 +412,173 @@ struct BufferLoadOpConversion
   }
 };
 
+struct BufferLoadToLocalOpConversion
+    : public ConvertOpToLLVMPattern<triton::amdgpu::BufferLoadToLocalOp>,
+      public LoadStoreConversionBase {
+  using ConvertOpToLLVMPattern<
+      triton::amdgpu::BufferLoadToLocalOp>::ConvertOpToLLVMPattern;
+
+  BufferLoadToLocalOpConversion(LLVMTypeConverter &converter,
+                                const AMD::TargetInfo &targetInfo,
+                                ModuleAxisInfoAnalysis &axisAnalysisPass,
+                                PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<triton::amdgpu::BufferLoadToLocalOp>(converter,
+                                                                    benefit),
+        LoadStoreConversionBase(targetInfo, axisAnalysisPass) {}
+
+  LogicalResult
+  matchAndRewrite(triton::amdgpu::BufferLoadToLocalOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op->getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    LLVM::AMD::BufferEmitter bufferEmitter(rewriter, loc, targetInfo);
+
+    // original values
+    Value ptr = op.getPtr();
+    Value offset = op.getOffsets();
+    Value dst = op.getResult();
+    Value mask = op.getMask();
+    Value other = op.getOther();
+    auto cacheMod = op.getCache();
+
+    // Converted values
+    Value llPtr = adaptor.getPtr();
+    Value llOffset = adaptor.getOffsets();
+    Value llDst = adaptor.getResult();
+    Value llMask = adaptor.getMask();
+    Value llOther = adaptor.getOther();
+    Value llStride = adaptor.getStride();
+
+    // Determine the vectorization size
+    Type valueTy = op.getType();
+    Type valueElemTy =
+        typeConverter->convertType(getElementTypeOrSelf(valueTy));
+    Type ptrType = getPointerTypeWithShape(ptr, offset);
+    unsigned numElems = getTotalElemsPerThread(ptrType);
+    unsigned vec = getVectorSize(ptr, offset, axisAnalysisPass);
+
+    // Get the offset
+    SmallVector<Value> offsetElems = unpackLLElements(loc, llOffset, rewriter);
+    assert(offsetElems.size() == numElems);
+
+    // Get the mask
+    SmallVector<Value> maskElems =
+        getMaskElemsAndUpdateVeclen(rewriter, loc, llMask, mask, vec);
+
+    // Get the `other` value (if any)
+    SmallVector<Value> otherElems;
+    if (llOther)
+      otherElems = unpackLLElements(loc, llOther, rewriter);
+
+    // Create the resource descriptor and then emit the buffer_load intrinsic(s)
+    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
+    SmallVector<Value> loadedVals;
+
+    auto srcTy = op.getPtr().getType();
+    auto dstTy = op.getResult().getType();
+    auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
+    auto smemObj = mlir::LLVM::getSharedMemoryObjectFromStruct(
+        loc, llDst, resElemTy, rewriter);
+
+    // Addresses to store into, one per `vecTy`.
+    auto offsetTy = dyn_cast<RankedTensorType>(offset.getType());
+    assert(offsetTy);
+
+    SmallVector<Value> shmemAddrs;
+    auto srcTensor =
+        dyn_cast<RankedTensorType>(getPointerTypeWithShape(ptr, offset));
+    assert(srcTensor);
+
+    VectorType vecTy;
+    bool ok = emitTransferBetweenRegistersAndShared(
+        srcTensor, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+        [&](VectorType vecTy_, Value shmemAddr) {
+          vecTy = vecTy_;
+          shmemAddrs.push_back(shmemAddr);
+        });
+    assert(ok);
+
+    int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
+    if (!supportsLoadWidth(vecBits, targetInfo)) {
+      return rewriter.notifyMatchFailure(
+          op, "Async copy does not support the required load vectorization");
+    }
+
+    int vecBytes = vecBits / 8;
+    assert(llvm::isPowerOf2_32(vecBytes));
+    Value vecBytesVal = b.i32_val(vecBytes);
+
+    Value cacheModifiers =
+        b.i32_val(mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
+            op.getCache(), /*isLoad=*/true, targetInfo));
+    unsigned maxVec = 1;
+
+    for (int i = 0; i < shmemAddrs.size(); i++) {
+      auto srcIdx = i * maxVec;
+      auto offsetIn = offsetElems[srcIdx];
+
+      if (!mask) {
+        // rewriter.create<ROCDL::GlobalLoadLDSOp>(
+        //     loc, srcPtr, shmemAddrs[i], vecBytesVal, /*offset=*/b.i32_val(0),
+        //     cacheModifiers);
+        Value pred = mask ? maskElems[srcIdx] : b.int_val(1, 1);
+        Value falseVal =
+            createZeroVector(rewriter, loc, cast<VectorType>(vecTy));
+        if (otherElems.size() != 0)
+          falseVal = packElementRangeIntoVector(
+              rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
+              otherElems, srcIdx);
+        Value loadVal = bufferEmitter.emitLoad(vecTy, rsrcDesc, offsetIn, pred,
+                                               falseVal, cacheMod);
+        continue;
+      }
+
+      Block *currentBlock = rewriter.getInsertionBlock();
+      Block *afterLoad =
+          rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+      Block *loadBlock = rewriter.createBlock(afterLoad);
+      rewriter.setInsertionPointToEnd(currentBlock);
+      rewriter.create<LLVM::CondBrOp>(loc, maskElems[srcIdx], loadBlock,
+                                      afterLoad);
+      rewriter.setInsertionPointToStart(loadBlock);
+      rewriter.create<ROCDL::GlobalLoadLDSOp>(
+          loc, srcPtr, shmemAddrs[i], vecBytesVal, /*offset=*/b.i32_val(0),
+          cacheModifiers);
+
+      rewriter.create<LLVM::BrOp>(loc, afterLoad);
+      rewriter.setInsertionPointToStart(afterLoad);
+      if (other) {
+        Value storeVal = packElementRangeIntoVector(
+            rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
+        llStore(rewriter, loc, shmemAddrs[i], storeVal,
+                b.icmp_ne(maskElems[srcIdx], b.true_val()), 0, op.getCache());
+      }
+    }
+  }
+
+  // Drop the result token.
+  // Value zero = rewriter.create<LLVM::ConstantOp>(
+  //     op.getLoc(), IntegerType::get(op.getContext(), 32),
+  //     rewriter.getI32IntegerAttr(0));
+  // rewriter.replaceOp(op, zero);
+  // return success();
+
+  // Type vecTy = LLVM::getFixedVectorType(valueElemTy, vec);
+  // for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
+  // } // end vec
+
+  // Type llvmResultStructTy = getTypeConverter()->convertType(valueTy);
+  // Value resultStruct = packLLElements(loc, getTypeConverter(), loadedVals,
+  //                                     rewriter, llvmResultStructTy);
+
+  // const int numVecs = numElems / vec;
+  // setNumGeneratedGlobalLoads(op, numVecs, vecTy);
+
+  // rewriter.replaceOp(op, {resultStruct});
+  return success();
+}
+};
+
 struct AsyncCopyGlobalToLocalOpConversion
     : public ConvertOpToLLVMPattern<triton::gpu::AsyncCopyGlobalToLocalOp>,
       public LoadStoreConversionBase {
@@ -406,22 +588,6 @@ struct AsyncCopyGlobalToLocalOpConversion
                                      PatternBenefit benefit)
       : ConvertOpToLLVMPattern(converter, benefit),
         LoadStoreConversionBase(targetInfo, axisAnalysisPass) {}
-
-  bool supportsLoadWidth(unsigned bits,
-                         const AMD::TargetInfo &targetInfo) const {
-    switch (targetInfo.getISAFamily()) {
-    case ISAFamily::CDNA1:
-    case ISAFamily::CDNA2:
-    case ISAFamily::CDNA3:
-      return llvm::is_contained({32, 16, 8}, bits);
-    case ISAFamily::CDNA4:
-      return llvm::is_contained({128, 96, 32, 16, 8}, bits);
-    default:
-      break;
-    }
-
-    return false;
-  }
 
   LogicalResult
   matchAndRewrite(triton::gpu::AsyncCopyGlobalToLocalOp op, OpAdaptor adaptor,
