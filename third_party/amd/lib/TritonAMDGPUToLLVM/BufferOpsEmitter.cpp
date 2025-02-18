@@ -104,19 +104,26 @@ Value BufferEmitter::emitLoad(Type type, Value rsrcDesc, Value offset,
   return data;
 }
 
-Value BufferEmitter::emitLoadToLds(Type type, Value rsrcDesc, Value offset,
-                                   Value pred, Value falseVal,
-                                   triton::CacheModifier cm) {
+void BufferEmitter::emitLoadToLds(Type type, Value loadStoreWidthBytes,
+                                  Value rsrcDesc, Value offset, Value dst,
+                                  Value pred, Value falseVal,
+                                  triton::CacheModifier cm) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   SmallVector<Value, 6> args;
   fillCommonArgs(type, rsrcDesc, offset, pred, cm, /*isBufferLoad=*/true, args);
   Type bufferType = getBufferOpType(type, false);
-  Value data = rewriter.create<ROCDL::RawPtrBufferLoadOp>(
-      loc, bufferType, args, ArrayRef<NamedAttribute>());
-  data = b.bitcast(data, type);
-  if (!isZero(falseVal))
-    data = b.select(pred, data, falseVal);
-  return data;
+  LLVM::createLLVMIntrinsicCallOp(rewriter, loc,
+                                  "llvm.amdgcn.raw.ptr.buffer.load.lds", {},
+                                  {
+                                      args[0], // Buffer descriptor
+                                      dst,     // LDS base ptr
+                                      loadStoreWidthBytes,
+                                      args[1],      // Buffer offset
+                                      b.i32_val(0), // LDS offsets
+                                      args[2],      // Instruction offset
+                                      args[3],      // AUX
+                                  });
+  // FIXME: support others/masking
 }
 
 Value BufferEmitter::emitAtomicRMW(RMWOp rmwType, Type type, Value rsrcDesc,

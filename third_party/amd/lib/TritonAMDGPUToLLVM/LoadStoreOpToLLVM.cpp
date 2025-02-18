@@ -27,7 +27,7 @@ using ::mlir::triton::AMD::ISAFamily;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 
 namespace {
-bool supportsLoadWidth(unsigned bits, const AMD::TargetInfo &targetInfo) const {
+bool supportsLoadWidth(unsigned bits, const AMD::TargetInfo &targetInfo) {
   switch (targetInfo.getISAFamily()) {
   case ISAFamily::CDNA1:
   case ISAFamily::CDNA2:
@@ -518,9 +518,6 @@ struct BufferLoadToLocalOpConversion
       auto offsetIn = offsetElems[srcIdx];
 
       if (!mask) {
-        // rewriter.create<ROCDL::GlobalLoadLDSOp>(
-        //     loc, srcPtr, shmemAddrs[i], vecBytesVal, /*offset=*/b.i32_val(0),
-        //     cacheModifiers);
         Value pred = mask ? maskElems[srcIdx] : b.int_val(1, 1);
         Value falseVal =
             createZeroVector(rewriter, loc, cast<VectorType>(vecTy));
@@ -528,8 +525,8 @@ struct BufferLoadToLocalOpConversion
           falseVal = packElementRangeIntoVector(
               rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
               otherElems, srcIdx);
-        Value loadVal = bufferEmitter.emitLoad(vecTy, rsrcDesc, offsetIn, pred,
-                                               falseVal, cacheMod);
+        bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc, offsetIn,
+                                    shmemAddrs[i], pred, falseVal, cacheMod);
         continue;
       }
 
@@ -541,9 +538,14 @@ struct BufferLoadToLocalOpConversion
       rewriter.create<LLVM::CondBrOp>(loc, maskElems[srcIdx], loadBlock,
                                       afterLoad);
       rewriter.setInsertionPointToStart(loadBlock);
-      rewriter.create<ROCDL::GlobalLoadLDSOp>(
-          loc, srcPtr, shmemAddrs[i], vecBytesVal, /*offset=*/b.i32_val(0),
-          cacheModifiers);
+      Value pred = mask ? maskElems[srcIdx] : b.int_val(1, 1);
+      Value falseVal = createZeroVector(rewriter, loc, cast<VectorType>(vecTy));
+      if (otherElems.size() != 0)
+        falseVal = packElementRangeIntoVector(
+            rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
+            otherElems, srcIdx);
+      bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc, offsetIn,
+                                  shmemAddrs[i], pred, falseVal, cacheMod);
 
       rewriter.create<LLVM::BrOp>(loc, afterLoad);
       rewriter.setInsertionPointToStart(afterLoad);
@@ -554,29 +556,28 @@ struct BufferLoadToLocalOpConversion
                 b.icmp_ne(maskElems[srcIdx], b.true_val()), 0, op.getCache());
       }
     }
+
+    // Drop the result token.
+    Value zero = rewriter.create<LLVM::ConstantOp>(
+        op.getLoc(), IntegerType::get(op.getContext(), 32),
+        rewriter.getI32IntegerAttr(0));
+    rewriter.replaceOp(op, zero);
+    return success();
+
+    // Type vecTy = LLVM::getFixedVectorType(valueElemTy, vec);
+    // for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
+    // } // end vec
+
+    // Type llvmResultStructTy = getTypeConverter()->convertType(valueTy);
+    // Value resultStruct = packLLElements(loc, getTypeConverter(), loadedVals,
+    //                                     rewriter, llvmResultStructTy);
+
+    // const int numVecs = numElems / vec;
+    // setNumGeneratedGlobalLoads(op, numVecs, vecTy);
+
+    // rewriter.replaceOp(op, {resultStruct});
+    return success();
   }
-
-  // Drop the result token.
-  // Value zero = rewriter.create<LLVM::ConstantOp>(
-  //     op.getLoc(), IntegerType::get(op.getContext(), 32),
-  //     rewriter.getI32IntegerAttr(0));
-  // rewriter.replaceOp(op, zero);
-  // return success();
-
-  // Type vecTy = LLVM::getFixedVectorType(valueElemTy, vec);
-  // for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
-  // } // end vec
-
-  // Type llvmResultStructTy = getTypeConverter()->convertType(valueTy);
-  // Value resultStruct = packLLElements(loc, getTypeConverter(), loadedVals,
-  //                                     rewriter, llvmResultStructTy);
-
-  // const int numVecs = numElems / vec;
-  // setNumGeneratedGlobalLoads(op, numVecs, vecTy);
-
-  // rewriter.replaceOp(op, {resultStruct});
-  return success();
-}
 };
 
 struct AsyncCopyGlobalToLocalOpConversion
@@ -2016,11 +2017,11 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        RewritePatternSet &patterns,
                                        ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                        PatternBenefit benefit) {
-  patterns
-      .add<AtomicCASOpConversion, AtomicRMWOpConversion, LoadOpConversion,
-           StoreOpConversion, BufferLoadOpConversion, BufferStoreOpConversion,
-           BufferAtomicRMWOpConversion, AsyncCopyGlobalToLocalOpConversion>(
-          typeConverter, targetInfo, axisInfoAnalysis, benefit);
+  patterns.add<AtomicCASOpConversion, AtomicRMWOpConversion, LoadOpConversion,
+               StoreOpConversion, BufferLoadOpConversion,
+               BufferLoadToLocalOpConversion, BufferStoreOpConversion,
+               BufferAtomicRMWOpConversion, AsyncCopyGlobalToLocalOpConversion>(
+      typeConverter, targetInfo, axisInfoAnalysis, benefit);
   patterns.add<AsyncWaitOpConversion>(typeConverter, targetInfo, benefit);
   patterns.add<AsyncCommitGroupOpConversion>(typeConverter, benefit);
 }

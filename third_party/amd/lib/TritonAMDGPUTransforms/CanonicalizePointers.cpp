@@ -1118,20 +1118,20 @@ public:
     operands[PtrLikeIdx] = createTensorPointer(
         rewriter, fatPtrBase, fatPtrOffset, curLoc, fatPtrAttrs);
 
-    llvm::outs() << "Before materialization: ";
-    op->print(llvm::outs());
-    llvm::outs() << "\n";
-    llvm::outs().flush();
+    // llvm::outs() << "Before materialization: ";
+    // op->print(llvm::outs());
+    // llvm::outs() << "\n";
+    // llvm::outs().flush();
     if (op->getNumResults())
       op = rewriter.replaceOpWithNewOp<SourceOp>(
           op, op->getResultTypes(), ValueRange{operands}, op->getAttrs());
     else
       op = rewriter.replaceOpWithNewOp<SourceOp>(
           op, TypeRange{}, ValueRange{operands}, op->getAttrs());
-    llvm::outs() << "Materialize for: ";
-    op->print(llvm::outs());
-    llvm::outs() << "\n";
-    llvm::outs().flush();
+    // llvm::outs() << "Materialize for: ";
+    // op->print(llvm::outs());
+    // llvm::outs() << "\n";
+    // llvm::outs().flush();
     return success();
   }
 };

@@ -774,7 +774,6 @@ struct ConvertAsyncCopyGlobalToLocalToBufferLoad
         bufferLoadOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(),
                               opIdxAttr);
       }
-      llvm::outs() << "REPLACE!!!!!!!!!!!\n";
       llvm::outs().flush();
       rewriter.replaceOp(op, bufferLoadOp);
       return success();

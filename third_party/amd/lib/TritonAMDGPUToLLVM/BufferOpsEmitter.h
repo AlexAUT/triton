@@ -70,6 +70,11 @@ struct BufferEmitter {
   Value emitLoad(Type type, Value rsrcDesc, Value offset, Value pred,
                  Value falseVal, CacheModifier cm);
 
+  // Emit a predicated rocdl.raw.ptr.buffer.load.lds
+  void emitLoadToLds(Type type, Value loadStoreWidthBytes, Value rsrcDesc,
+                     Value offset, Value dst, Value pred, Value falseVal,
+                     CacheModifier cm);
+
   // Emit a predicated rocdl.raw.ptr.buffer.atomic.* RMWOp
   Value emitAtomicRMW(RMWOp rmwType, Type type, Value rsrcDesc, Value offset,
                       Value data, Value pred, bool hasUsers);
