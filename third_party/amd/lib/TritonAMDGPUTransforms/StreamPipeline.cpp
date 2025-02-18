@@ -11,6 +11,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Schedule.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 
@@ -294,12 +295,38 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
   Value other = loadOp.getOther();
 
   ttg::MemDescType allocTy = cast<ttg::MemDescType>(alloc.getType());
-  SmallVector<Value> copyOffsets(allocTy.getRank(), zero);
-  Operation *copy = builder.clone(*loadOp);
+  auto sharedEncodingAttr =
+      cast<ttg::SwizzledSharedEncodingAttr>(allocTy.getEncoding());
 
-  auto [stage, cluster] = schedule[loadOp];
-  schedule.erase(loadOp);
-  schedule.insert(copy, stage, cluster);
+  auto srcTy = dyn_cast<triton::gpu::TensorOrMemDesc>(src.getType());
+  assert(srcTy);
+  bool useAsyncCopy = false;
+
+  // Hide it behind env variable and only use it for numStages==3. For
+  // numStages==2 we have correctness issues.
+  //   For numStages==2 we need 2 barriers one to wait with the local_reads
+  // until the AsyncCopy has completed for the whole WG and then another after
+  // the local_reads to guard against the AsyncCopy of the next iteration
+  // (prefetch). Overall this 2-way dependency limits the ability to hide the
+  // AsyncCopies with other instructions.
+  //   For numStages==3 we do not have to this dependency as the we have 2 LDS
+  //   buffers so we can prefetch the next iteration into lds while reading the
+  //   current iteration
+  if (triton::tools::getBoolEnv("AMDGCN_USE_ASYNC_COPY") && numStages > 2 &&
+      llvm::equal(sharedEncodingAttr.getOrder(), ttg::getOrder(srcTy))) {
+    useAsyncCopy = true;
+    LDBG("Emit async copy for: " << *loadOp);
+    LDBG("Shared encoding: " << sharedEncodingAttr);
+  }
+
+  Operation *newLoadOp{};
+
+  if (!useAsyncCopy) {
+    newLoadOp = builder.clone(*loadOp);
+    auto [stage, cluster] = schedule[loadOp];
+    schedule.erase(loadOp);
+    schedule.insert(newLoadOp, stage, cluster);
+  }
 
   // Extract part.
   SmallVector<Value> loadOffsets(allocTy.getRank(), zero);
@@ -321,15 +348,38 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
   for (auto alloc : allocsToErase)
     alloc.erase();
 
+  Operation *wait{};
+  if (useAsyncCopy) {
+    auto [stage, cluster] = schedule[loadOp];
+
+    newLoadOp = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
+        loadOp.getLoc(), src, viewLoad, loadOp.getMask(), loadOp.getOther(),
+        loadOp.getCache(), loadOp.getEvict(), loadOp.getIsVolatile());
+
+    wait = builder.create<ttg::AsyncWaitOp>(loc, newLoadOp->getResult(0), 0);
+
+    schedule.erase(loadOp);
+    schedule.insert(newLoadOp, stage, cluster);
+  }
+
   // Prefetch load ahead of the dot stage if is used by the dot.
-  auto storeOp =
-      builder.create<ttg::LocalStoreOp>(loc, copy->getResult(0), viewLoad);
-  scheduleOp(viewLoad, SCHED_LOCAL_STORE);
-  scheduleOp(storeOp, SCHED_LOCAL_STORE);
+  Operation *storeOp{};
+
+  if (!useAsyncCopy) {
+    storeOp = builder.create<ttg::LocalStoreOp>(loc, newLoadOp->getResult(0),
+                                                viewLoad);
+    scheduleOp(viewLoad, SCHED_LOCAL_STORE);
+    scheduleOp(storeOp, SCHED_LOCAL_STORE);
+  } else {
+    // FIXME: it should be scheduled as a local_load to hide latency but that
+    // currently breaks the scheduling as we require one more lds buffer to make
+    // that work
+    scheduleOp(newLoadOp, SCHED_LOCAL_STORE);
+  }
 
   // Create local load
-  auto sharedLoad =
-      builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewLoad);
+  auto sharedLoad = builder.create<ttg::LocalLoadOp>(
+      loc, loadOp.getType(), viewLoad, wait ? wait->getResult(0) : OpResult{});
   Value result = sharedLoad.getResult();
   if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE])
     scheduleOp(sharedLoad, SCHED_LOCAL_LOAD);
@@ -340,7 +390,8 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
   // instruction scheduling hints to correctly count the emitted `ds_write`
   // instructions for each GEMM tile.
   if (auto attr = loadOp->getAttr(tt::amdgpu::OpIdxAttr::getMnemonic())) {
-    storeOp->setAttr(tt::amdgpu::OpIdxAttr::getMnemonic(), attr);
+    (useAsyncCopy ? newLoadOp : storeOp)
+        ->setAttr(tt::amdgpu::OpIdxAttr::getMnemonic(), attr);
   }
 
   loadOp->replaceAllUsesWith(ValueRange{result});
