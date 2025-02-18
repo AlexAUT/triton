@@ -683,14 +683,13 @@ private:
   ModuleAxisInfoAnalysis &axisAnalysisPass;
 };
 
-struct ConvertTritonLoadToBufferLoad
-    : public mlir::OpRewritePattern<triton::LoadOp> {
-  using OpRewritePattern::OpRewritePattern;
+template <typename SourceOp>
+struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
+  using OpRewritePattern<SourceOp>::OpRewritePattern;
 
   ConvertTritonLoadToBufferLoad(mlir::MLIRContext *context,
                                 DenseSet<Value> &assumptions)
-      : mlir::OpRewritePattern<triton::LoadOp>(context),
-        assumptions(assumptions) {}
+      : mlir::OpRewritePattern<SourceOp>(context), assumptions(assumptions) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::LoadOp op, PatternRewriter &rewriter) const override {
@@ -710,9 +709,25 @@ struct ConvertTritonLoadToBufferLoad
       if (op.getMask() && !isZeroConst(op.getMask()))
         maybeMask = op.getMask();
       Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
-      auto bufferLoadOp = rewriter.create<triton::amdgpu::BufferLoadOp>(
-          op->getLoc(), op.getType(), basePtr, tensorOffset, blockStride,
-          op.getCache(), maybeMask, maybeOther);
+
+      auto bufferLoadOp = [&]() {
+        if constexpr (std::is_same_v<SourceOp, triton::LoadOp>) {
+          return rewriter.create<triton::amdgpu::BufferLoadOp>(
+              op->getLoc(), op.getType(), basePtr, tensorOffset, blockStride,
+              op.getCache(), maybeMask, maybeOther);
+        } else if constexpr (std::is_same_v<
+                                 SourceOp,
+                                 triton::gpu::AsyncCopyGlobalToLocalOp>) {
+          return rewriter.create<triton::amdgpu::BufferLoadToLocalOp>(
+              op->getLoc(), op.getType(), basePtr, tensorOffset, op.getResult(),
+              blockStride, op.getCache(), maybeMask, maybeOther);
+        } else {
+          static_assert(false,
+                        "Unsupported type in ConvertTritonLoadToBufferLoad");
+        }
+      }();
+
+      assert(bufferLoadOp);
 
       // Propagate `OpIdxAttr` if the currently processed `tt.LoadOp` was
       // labeled it. The attribute needs to be preserved for custom instruction
@@ -808,7 +823,10 @@ public:
     collectRanges(solver, mod);
 
     ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
-    patterns.add<ConvertTritonLoadToBufferLoad>(context, assumptions);
+    patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>>(context,
+                                                            assumptions);
+    patterns.add<ConvertTritonLoadToBufferLoad<ttg::AsyncCopyGlobalToLocalOp>>(
+        context, assumptions);
     patterns.add<ConvertTritonStoreToBufferStore>(context, assumptions);
 
     // Gate buffer atomics behind CDNA3 (i.e., MI300 series) for now
