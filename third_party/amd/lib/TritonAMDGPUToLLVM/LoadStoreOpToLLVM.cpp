@@ -436,10 +436,7 @@ struct BufferLoadToLocalOpConversion
     // original values
     Value ptr = op.getPtr();
     Value offset = op.getOffsets();
-    Value dst = op.getResult();
     Value mask = op.getMask();
-    Value other = op.getOther();
-    auto cacheMod = op.getCache();
 
     // Converted values
     Value llPtr = adaptor.getPtr();
@@ -450,10 +447,9 @@ struct BufferLoadToLocalOpConversion
     Value llStride = adaptor.getStride();
 
     // Determine the vectorization size
-    Type valueTy = op.getType();
-    Type valueElemTy =
-        typeConverter->convertType(getElementTypeOrSelf(valueTy));
-    Type ptrType = getPointerTypeWithShape(ptr, offset);
+    RankedTensorType ptrType =
+        dyn_cast<RankedTensorType>(getPointerTypeWithShape(ptr, offset));
+    assert(ptrType);
     unsigned numElems = getTotalElemsPerThread(ptrType);
     unsigned vec = getVectorSize(ptr, offset, axisAnalysisPass);
 
@@ -472,26 +468,16 @@ struct BufferLoadToLocalOpConversion
 
     // Create the resource descriptor and then emit the buffer_load intrinsic(s)
     Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
-    SmallVector<Value> loadedVals;
 
-    auto srcTy = op.getPtr().getType();
     auto dstTy = op.getResult().getType();
     auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
     auto smemObj = mlir::LLVM::getSharedMemoryObjectFromStruct(
         loc, llDst, resElemTy, rewriter);
 
-    // Addresses to store into, one per `vecTy`.
-    auto offsetTy = dyn_cast<RankedTensorType>(offset.getType());
-    assert(offsetTy);
-
-    SmallVector<Value> shmemAddrs;
-    auto srcTensor =
-        dyn_cast<RankedTensorType>(getPointerTypeWithShape(ptr, offset));
-    assert(srcTensor);
-
     VectorType vecTy;
+    SmallVector<Value> shmemAddrs;
     bool ok = emitTransferBetweenRegistersAndShared(
-        srcTensor, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+        ptrType, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
         [&](VectorType vecTy_, Value shmemAddr) {
           vecTy = vecTy_;
           shmemAddrs.push_back(shmemAddr);
@@ -508,13 +494,8 @@ struct BufferLoadToLocalOpConversion
     assert(llvm::isPowerOf2_32(vecBytes));
     Value vecBytesVal = b.i32_val(vecBytes);
 
-    Value cacheModifiers =
-        b.i32_val(mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
-            op.getCache(), /*isLoad=*/true, targetInfo));
-    unsigned maxVec = 1;
-
     for (int i = 0; i < shmemAddrs.size(); i++) {
-      auto srcIdx = i * maxVec;
+      auto srcIdx = i * vec;
       auto offsetIn = offsetElems[srcIdx];
 
       if (!mask) {
@@ -526,7 +507,8 @@ struct BufferLoadToLocalOpConversion
               rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
               otherElems, srcIdx);
         bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc, offsetIn,
-                                    shmemAddrs[i], pred, falseVal, cacheMod);
+                                    shmemAddrs[i], pred, falseVal,
+                                    op.getCache());
         continue;
       }
 
@@ -545,11 +527,11 @@ struct BufferLoadToLocalOpConversion
             rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
             otherElems, srcIdx);
       bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc, offsetIn,
-                                  shmemAddrs[i], pred, falseVal, cacheMod);
+                                  shmemAddrs[i], pred, falseVal, op.getCache());
 
       rewriter.create<LLVM::BrOp>(loc, afterLoad);
       rewriter.setInsertionPointToStart(afterLoad);
-      if (other) {
+      if (llOther) {
         Value storeVal = packElementRangeIntoVector(
             rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
         llStore(rewriter, loc, shmemAddrs[i], storeVal,
@@ -562,20 +544,6 @@ struct BufferLoadToLocalOpConversion
         op.getLoc(), IntegerType::get(op.getContext(), 32),
         rewriter.getI32IntegerAttr(0));
     rewriter.replaceOp(op, zero);
-    return success();
-
-    // Type vecTy = LLVM::getFixedVectorType(valueElemTy, vec);
-    // for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
-    // } // end vec
-
-    // Type llvmResultStructTy = getTypeConverter()->convertType(valueTy);
-    // Value resultStruct = packLLElements(loc, getTypeConverter(), loadedVals,
-    //                                     rewriter, llvmResultStructTy);
-
-    // const int numVecs = numElems / vec;
-    // setNumGeneratedGlobalLoads(op, numVecs, vecTy);
-
-    // rewriter.replaceOp(op, {resultStruct});
     return success();
   }
 };
@@ -666,8 +634,6 @@ struct AsyncCopyGlobalToLocalOpConversion
             shmemAddrs.push_back(shmemAddr);
           });
       assert(ok);
-
-      vecTy.print(llvm::outs());
 
       // We can only apply the trick if we do not swizzle across warp boundaries
       // This means the lane dimensions has to be smaller than 2^lane_dim - 1
