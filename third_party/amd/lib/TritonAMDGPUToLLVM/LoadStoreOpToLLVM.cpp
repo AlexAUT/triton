@@ -42,6 +42,33 @@ bool supportsLoadWidth(unsigned bits, const AMD::TargetInfo &targetInfo) {
   return false;
 }
 
+// Return true if the src encoding and the destination encoding (in LDS) result
+// in coalesced writes
+bool writesCoalscedIntoLocalMemory(RewriterBase &rewriter,
+                                   RankedTensorType srcTy, MemDescType dstTy,
+                                   unsigned vectorization) {
+  auto shape = srcTy.getShape();
+  LinearLayout srcLayout =
+      triton::gpu::toLinearLayout(shape, srcTy.getEncoding());
+  LinearLayout sharedLayout =
+      triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
+  LinearLayout srcToSharedLayout = srcLayout.invertAndCompose(sharedLayout);
+
+  StringAttr kLane = rewriter.getStringAttr("lane");
+  for (int inLane : llvm::seq(srcToSharedLayout.getInDimSizeLog2(kLane))) {
+    auto basis = srcToSharedLayout.getBasis(kLane, inLane)[0];
+    unsigned expected = vectorization * (1 << inLane);
+    if (basis != expected) {
+      LDBG("detected uncoalesced layout from blocked to shared in async copy "
+           "for lane "
+           << 1 + inLane << "; given " << basis << " but expected "
+           << expected);
+      return false;
+    }
+  }
+  return true;
+}
+
 // Return the mask for the unique data accessed by given tensor type.
 // Used to mask out the redundant data accessed by threads.
 Value redundantDataMask(Type valueTy, ConversionPatternRewriter &rewriter,
@@ -441,7 +468,12 @@ struct BufferLoadToLocalOpConversion
     Value llOther = adaptor.getOther();
     Value llStride = adaptor.getStride();
 
-    // Determine the vectorization size
+    // We can load N elements at a time if:
+    //  1. Every group of N source pointers are contiguous.  For example, if
+    //     N=2, then the pointers should be [x, x+1, y, y+1, ...].
+    //  2. The mask (if present) has "alignment" N, meaning that each group of N
+    //     mask bits are the same.  For example if N=2, the mask must be
+    //     [x, x, y, y, ...].
     RankedTensorType ptrType =
         dyn_cast<RankedTensorType>(getPointerTypeWithShape(ptr, offset));
     assert(ptrType);
@@ -461,10 +493,17 @@ struct BufferLoadToLocalOpConversion
     if (llOther)
       otherElems = unpackLLElements(loc, llOther, rewriter);
 
-    // Create the resource descriptor and then emit the buffer_load intrinsic(s)
+    // buffer_load into LDS does not support per lane offsets.
+    // We need to ensure that we write coalesced into shared memory.
+    auto dstTy = op.getResult().getType();
+    if (!writesCoalscedIntoLocalMemory(rewriter, ptrType, dstTy, vec)) {
+      return rewriter.notifyMatchFailure(op,
+                                         "does not write coalesced into LDS");
+    }
+
+    // Create the resource descriptor and then emit the buffer_loads to lds
     Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
 
-    auto dstTy = op.getResult().getType();
     auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
     auto smemObj = mlir::LLVM::getSharedMemoryObjectFromStruct(
         loc, llDst, resElemTy, rewriter);
@@ -496,7 +535,7 @@ struct BufferLoadToLocalOpConversion
       Value pred = mask ? maskElems[srcIdx] : b.int_val(1, 1);
       bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc, offsetIn,
                                   shmemAddrs[i], pred, op.getCache());
-      if (llOther) {
+      if (!otherElems.empty()) {
         Value storeVal = packElementRangeIntoVector(
             rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
         llStore(rewriter, loc, shmemAddrs[i], storeVal,
@@ -558,34 +597,16 @@ struct AsyncCopyGlobalToLocalOpConversion
     //     [x, x, y, y, ...].
     unsigned maxVec =
         mlir::LLVM::AMD::getContiguity(op.getSrc(), axisAnalysisPass);
-    Value mask = op.getMask();
-    if (mask) {
-      maxVec = std::min(maxVec, getMaskAlignment(mask));
-    }
+    auto maskElements = getMaskElemsAndUpdateVeclen(
+        rewriter, loc, adaptor.getMask(), op.getMask(), maxVec);
 
     // global.load.lds does not support per lane offsets.
     // We need to ensure that we write coalesced into shared memory. This means
     // that the kLane dim needs to be contigeous based on the vectorization
     // size.
-    auto shape = dstTy.getShape();
-    LinearLayout srcLayout =
-        triton::gpu::toLinearLayout(shape, srcTy.getEncoding());
-    LinearLayout sharedLayout =
-        triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
-    LinearLayout srcToSharedLayout = srcLayout.invertAndCompose(sharedLayout);
-
-    StringAttr kLane = rewriter.getStringAttr("lane");
-    for (int inLane : llvm::seq(srcToSharedLayout.getInDimSizeLog2(kLane))) {
-      auto basis = srcToSharedLayout.getBasis(kLane, inLane)[0];
-      unsigned expected = maxVec * (1 << inLane);
-      if (basis != expected) {
-        LDBG("detected uncoalesced layout from blocked to shared in async copy "
-             "for lane "
-             << 1 + inLane << "; given " << basis << " but expected "
-             << expected);
-        return rewriter.notifyMatchFailure(op,
-                                           "does not write coalesced into LDS");
-      }
+    if (!writesCoalscedIntoLocalMemory(rewriter, srcTy, dstTy, maxVec)) {
+      return rewriter.notifyMatchFailure(op,
+                                         "does not write coalesced into LDS");
     }
 
     // Addresses to store into, one per `vecTy`.
@@ -620,9 +641,8 @@ struct AsyncCopyGlobalToLocalOpConversion
       assert(srcElems.size() == maskElems.size());
     }
 
-    Value other = op.getOther();
     SmallVector<Value> otherElems;
-    if (other) {
+    if (op.getOther()) {
       otherElems = unpackLLElements(loc, adaptor.getOther(), rewriter);
       assert(srcElems.size() == otherElems.size());
     }
@@ -631,7 +651,7 @@ struct AsyncCopyGlobalToLocalOpConversion
       auto srcIdx = i * maxVec;
       auto srcPtr = srcElems[srcIdx];
 
-      if (!mask) {
+      if (maskElems.empty()) {
         rewriter.create<ROCDL::GlobalLoadLDSOp>(
             loc, srcPtr, shmemAddrs[i], vecBytesVal, /*offset=*/b.i32_val(0),
             cacheModifiers);
@@ -652,7 +672,7 @@ struct AsyncCopyGlobalToLocalOpConversion
 
       rewriter.create<LLVM::BrOp>(loc, afterLoad);
       rewriter.setInsertionPointToStart(afterLoad);
-      if (other) {
+      if (!otherElems.empty()) {
         Value storeVal = packElementRangeIntoVector(
             rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
         llStore(rewriter, loc, shmemAddrs[i], storeVal,
