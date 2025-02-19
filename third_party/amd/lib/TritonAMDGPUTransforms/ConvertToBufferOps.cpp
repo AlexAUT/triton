@@ -691,9 +691,9 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
       : mlir::OpRewritePattern<SourceOp>(context), assumptions(assumptions) {}
 
   mlir::LogicalResult
-  matchAndRewrite(triton::LoadOp op, PatternRewriter &rewriter) const override {
+  matchAndRewrite(SourceOp op, PatternRewriter &rewriter) const override {
     LDBG("Try to convert: " << op);
-    Value ptr = op.getPtr();
+    Value ptr = op.getOperand(0);
 
     if (canUseBufferOps(ptr, assumptions)) {
       auto addPtrOp = ptr.getDefiningOp<triton::AddPtrOp>();
@@ -731,8 +731,9 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
       // Propagate `OpIdxAttr` if the currently processed `tt.LoadOp` was
       // labeled it. The attribute needs to be preserved for custom instruction
       // scheduling.
-      if (auto opIdxAttr = op->getAttrOfType<triton::amdgpu::OpIdxAttr>(
-              triton::amdgpu::OpIdxAttr::getMnemonic())) {
+      if (auto opIdxAttr =
+              op->template getAttrOfType<triton::amdgpu::OpIdxAttr>(
+                  triton::amdgpu::OpIdxAttr::getMnemonic())) {
         bufferLoadOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(),
                               opIdxAttr);
       }
@@ -822,11 +823,9 @@ public:
     collectRanges(solver, mod);
 
     ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
-    patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>>(context,
-                                                            assumptions);
-    patterns.add<ConvertTritonLoadToBufferLoad<ttg::AsyncCopyGlobalToLocalOp>>(
-        context, assumptions);
-    patterns.add<ConvertTritonStoreToBufferStore>(context, assumptions);
+    patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>,
+                 ConvertTritonLoadToBufferLoad<ttg::AsyncCopyGlobalToLocalOp>,
+                 ConvertTritonStoreToBufferStore>(context, assumptions);
 
     // Gate buffer atomics behind CDNA3 (i.e., MI300 series) for now
     // GFX942-specific assumptions regarding cache coherence are made when
