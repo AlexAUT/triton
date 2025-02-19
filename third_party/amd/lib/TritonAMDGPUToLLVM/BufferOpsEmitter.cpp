@@ -111,15 +111,18 @@ void BufferEmitter::emitLoadToLds(Type type, Value byteWidth, Value rsrcDesc,
   SmallVector<Value, 6> args;
   fillCommonArgs(type, rsrcDesc, offset, pred, cm, /*isBufferLoad=*/true, args);
   Type bufferType = getBufferOpType(type, false);
-  rewriter.create<ROCDL::RawPtrBufferLoadLdsOp>(loc,
-                                                args[0],   // Buffer descriptor
-                                                dst,       // LDS base ptr
-                                                byteWidth, // Instr size
-                                                args[1],   // Buffer offset
-                                                b.i32_val(0), // LDS offsets
-                                                args[2], // Instruction offset
-                                                args[3]  // AUX
-  );
+  rewriter.create<ROCDL::RawPtrBufferLoadLdsOp>(
+      loc, TypeRange{},
+      ValueRange{
+          args[0],      // Buffer descriptor
+          dst,          // LDS base ptr
+          byteWidth,    // Instr size
+          args[1],      // Buffer offset
+          b.i32_val(0), // LDS offsets
+          args[2],      // Instruction offset
+          args[3],      // AUX
+      },
+      ArrayRef<NamedAttribute>());
 }
 
 Value BufferEmitter::emitAtomicRMW(RMWOp rmwType, Type type, Value rsrcDesc,
