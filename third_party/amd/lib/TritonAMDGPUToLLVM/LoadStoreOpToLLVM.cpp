@@ -27,48 +27,6 @@ using ::mlir::triton::AMD::ISAFamily;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 
 namespace {
-bool supportsLoadWidth(unsigned bits, const AMD::TargetInfo &targetInfo) {
-  switch (targetInfo.getISAFamily()) {
-  case ISAFamily::CDNA1:
-  case ISAFamily::CDNA2:
-  case ISAFamily::CDNA3:
-    return llvm::is_contained({32, 16, 8}, bits);
-  case ISAFamily::CDNA4:
-    return llvm::is_contained({128, 96, 32, 16, 8}, bits);
-  default:
-    break;
-  }
-
-  return false;
-}
-
-// Return true if the src encoding and the destination encoding (in LDS) result
-// in coalesced writes
-bool writesCoalscedIntoLocalMemory(RewriterBase &rewriter,
-                                   RankedTensorType srcTy, MemDescType dstTy,
-                                   unsigned vectorization) {
-  auto shape = srcTy.getShape();
-  LinearLayout srcLayout =
-      triton::gpu::toLinearLayout(shape, srcTy.getEncoding());
-  LinearLayout sharedLayout =
-      triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
-  LinearLayout srcToSharedLayout = srcLayout.invertAndCompose(sharedLayout);
-
-  StringAttr kLane = rewriter.getStringAttr("lane");
-  for (int inLane : llvm::seq(srcToSharedLayout.getInDimSizeLog2(kLane))) {
-    auto basis = srcToSharedLayout.getBasis(kLane, inLane)[0];
-    unsigned expected = vectorization * (1 << inLane);
-    if (basis != expected) {
-      LDBG("detected uncoalesced layout from blocked to shared in async copy "
-           "for lane "
-           << 1 + inLane << "; given " << basis << " but expected "
-           << expected);
-      return false;
-    }
-  }
-  return true;
-}
-
 // Return the mask for the unique data accessed by given tensor type.
 // Used to mask out the redundant data accessed by threads.
 Value redundantDataMask(Type valueTy, ConversionPatternRewriter &rewriter,
@@ -496,7 +454,8 @@ struct BufferLoadToLocalOpConversion
     // buffer_load into LDS does not support per lane offsets.
     // We need to ensure that we write coalesced into shared memory.
     auto dstTy = op.getResult().getType();
-    if (!writesCoalscedIntoLocalMemory(rewriter, ptrType, dstTy, vec)) {
+    if (!LLVM::AMD::writesCoalscedIntoLocalMemory(rewriter, ptrType, dstTy,
+                                                  vec)) {
       return rewriter.notifyMatchFailure(op,
                                          "does not write coalesced into LDS");
     }
@@ -519,7 +478,7 @@ struct BufferLoadToLocalOpConversion
     assert(ok);
 
     int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
-    if (!supportsLoadWidth(vecBits, targetInfo)) {
+    if (!llvm::is_contained(targetInfo.supportedLoadWidthsToLds(), vecBits)) {
       return rewriter.notifyMatchFailure(
           op, "Async copy does not support the required load vectorization");
     }
@@ -604,7 +563,8 @@ struct AsyncCopyGlobalToLocalOpConversion
     // We need to ensure that we write coalesced into shared memory. This means
     // that the kLane dim needs to be contigeous based on the vectorization
     // size.
-    if (!writesCoalscedIntoLocalMemory(rewriter, srcTy, dstTy, maxVec)) {
+    if (!LLVM::AMD::writesCoalscedIntoLocalMemory(rewriter, srcTy, dstTy,
+                                                  maxVec)) {
       return rewriter.notifyMatchFailure(op,
                                          "does not write coalesced into LDS");
     }
@@ -621,7 +581,7 @@ struct AsyncCopyGlobalToLocalOpConversion
     assert(ok);
 
     int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
-    if (!supportsLoadWidth(vecBits, targetInfo)) {
+    if (!llvm::is_contained(targetInfo.supportedLoadWidthsToLds(), vecBits)) {
       return rewriter.notifyMatchFailure(
           op, "Async copy does not support the required load vectorization");
     }
