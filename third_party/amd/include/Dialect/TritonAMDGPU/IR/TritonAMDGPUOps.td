@@ -240,12 +240,9 @@ def BufferLoadToLocalOp : TT_AMDGPU_Op<"buffer_load_to_local", [
   MemoryEffects<[MemRead<GlobalMemory>]>,
   MemoryEffects<[MemWrite<LocalMemory>]>,
   TypesMatchWith<"result element type matches the pointed type of ptr", "result", "ptr", "getPointerTypeToElement($_self)">,
-  TypesMatchWith<"infer mask type from ptr type",
-                 "ptr", "mask", "getI1SameShape($_self)",
-                 "($_op.getOperands().size() <= 6) || std::equal_to<>()">,
-  TypesMatchWith<"infer other type from ptr type",
-                 "ptr", "other", "getPointeeType($_self)",
-                 "($_op.getOperands().size() <= 7) || std::equal_to<>()">
+  TypesMatchWith<"infer mask shape from offsets",
+                 "offsets", "mask", "getI1SameShape($_self)",
+                 "(cast<BufferLoadToLocalOp>($_op).getMask() == nullptr) || std::equal_to<>()">,
 ]>{
     let summary = "Load from a scalar base pointer and a tensor offset to local memory";
     let description = [{
@@ -265,8 +262,10 @@ def BufferLoadToLocalOp : TT_AMDGPU_Op<"buffer_load_to_local", [
       $ptr `[` $offsets `]` `,` $result (`mask` $mask^)? (`other` $other^)?
       (`stride` `=` $stride^)?
       oilist(`cacheModifier` `=` $cache)
-      attr-dict `:` type($ptr) `[` type($offsets) `]` `->` type($result)
+      attr-dict `:` type($ptr) `[` type($offsets) `]` type($other) `->` type($result)
     }];
+
+    let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//

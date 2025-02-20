@@ -26,6 +26,7 @@
 #include "mlir/IR/OpImplementation.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+#include "amd/lib/TritonAMDGPUToLLVM/Utility.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 // clang-format off
@@ -239,6 +240,19 @@ UpcastMXFPOp::deduceOutputType(TypedValue<RankedTensorType> inputTensor,
   const int kIdx = (opIdx == 0 ? 1 : 0) + hasBatch;
   newShape[kIdx] *= 2;
   return RankedTensorType::get(newShape, outputElemType, newVEncoding);
+}
+
+LogicalResult BufferLoadToLocalOp::verify() {
+  auto other = getOther();
+  if (!other)
+    return success();
+
+  auto srcTy = LLVM::AMD::getPointerTypeWithShape(getPtr(), getOffsets());
+  if (other.getType() != srcTy)
+    return emitError("other type must share the datatype with ptr and the "
+                     "shape and encoding of offsets");
+
+  return success();
 }
 
 } // namespace mlir::triton::amdgpu
