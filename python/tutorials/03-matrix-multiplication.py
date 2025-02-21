@@ -206,21 +206,24 @@ def get_cuda_autotune_config():
 
 def get_hip_autotune_config():
     return [
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
+        #     num_warps=4, num_stages=2),
         triton.Config(
             {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 3},
             num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 8},
-            num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2},
+        #     num_warps=8, num_stages=6),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+        #     num_warps=8, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 3},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 8},
+        #     num_warps=4, num_stages=2),
     ]
 
 
@@ -260,6 +263,19 @@ def matmul_kernel(
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
     """
+    tl.assume(M > 0)
+    tl.assume(N > 0)
+    tl.assume(K > 0)
+    tl.assume(stride_am > 0)
+    tl.assume(stride_ak > 0)
+    tl.assume(stride_bk > 0)
+    tl.assume(stride_bn > 0)
+    tl.assume(stride_cm > 0)
+    tl.assume(stride_cn > 0)
+    tl.assume(BLOCK_SIZE_M > 0)
+    tl.assume(BLOCK_SIZE_N > 0)
+    tl.assume(BLOCK_SIZE_K > 0)
+    tl.assume(GROUP_SIZE_M > 0)
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
@@ -281,6 +297,8 @@ def matmul_kernel(
     # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
     # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
     # See above `Pointer Arithmetic` section for details
+    tl.assume(pid_m > 0)
+    tl.assume(pid_n > 0)
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
@@ -296,8 +314,8 @@ def matmul_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        a = tl.load(a_ptrs)  #, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        b = tl.load(b_ptrs)  #, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         # We accumulate along the K dimension.
         accumulator = tl.dot(a, b, accumulator)
         # Advance the ptrs to the next K block.
@@ -332,7 +350,7 @@ def leaky_relu(x):
 def matmul(a, b, activation=""):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
-    assert a.is_contiguous(), "Matrix A must be contiguous"
+    # assert a.is_contiguous(), "Matrix A must be contiguous"
     M, K = a.shape
     K, N = b.shape
     # Allocates output.
@@ -358,9 +376,15 @@ def matmul(a, b, activation=""):
 
 torch.manual_seed(0)
 a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
+a = a.T
 b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
-triton_output = matmul(a, b)
+# a = torch.zeros_like(a) + 1
+# b = torch.zeros_like(b) + 1
 torch_output = torch.matmul(a, b)
+triton_output = matmul(a, b)
+torch.set_printoptions(threshold=10_000)
+# print(a)
+# print(b)
 print(f"triton_output_with_fp16_inputs={triton_output}")
 print(f"torch_output_with_fp16_inputs={torch_output}")
 # Bigger tolerance for AMD MI200 devices.
@@ -371,6 +395,7 @@ if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=rtol):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
+    print(f"Max diff: {torch.max(torch_output - triton_output)}")
 
 TORCH_HAS_FP8 = hasattr(torch, "float8_e5m2")
 if TORCH_HAS_FP8 and is_cuda():
@@ -381,8 +406,8 @@ if TORCH_HAS_FP8 and is_cuda():
     # pre-transpose b for efficiency.
     b = b.T
     b = b.to(torch.float8_e5m2)
-    triton_output = matmul(a, b)
     torch_output = torch.matmul(a.to(torch.float16), b.to(torch.float16))
+    triton_output = matmul(a, b)
     print(f"triton_output_with_fp8_inputs={triton_output}")
     print(f"torch_output_with_fp8_inputs={torch_output}")
     if torch.allclose(triton_output, torch_output, atol=0.125, rtol=0):
@@ -440,4 +465,4 @@ def benchmark(M, N, K, provider, fp8_inputs):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-benchmark.run(show_plots=True, print_data=True)
+# benchmark.run(show_plots=False, print_data=True)

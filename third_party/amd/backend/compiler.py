@@ -366,6 +366,8 @@ class HIPBackend(BaseBackend):
         if os.environ.get("AMDGCN_ENABLE_DUMP", "0") == "1":
             print("// -----// AMDGCN Dump //----- //")
             print(amdgcn)
+        with open("out.amdgcn", "w") as f:
+            f.write(amdgcn)
         return amdgcn
 
     @staticmethod
