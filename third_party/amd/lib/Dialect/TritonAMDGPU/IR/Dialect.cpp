@@ -254,10 +254,10 @@ LogicalResult BufferLoadToLocalOp::verify() {
   auto offsetType = cast<RankedTensorType>(getOffsets().getType());
   auto expectedType = offsetType.cloneWith(std::nullopt, elemTy);
 
-  if (other.getType() != expectedType)
+  if (other.getType() != expectedType) {
     return emitError("other type must share the datatype with ptr and the "
-                     "shape and encoding of offsets")
-           << "got: " << srcTy << " and " << other.getType();
+                     "shape and encoding of offsets.");
+  }
 
   return success();
 }

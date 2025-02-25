@@ -10,7 +10,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
                                 %arg1: !tt.ptr<f16>,
                                 %arg2: tensor<32x64xi32, #blocked>,
                                 %arg3: !ttg.memdesc<32x64xf16, #shared, #smem, mutable>) {
-    // Each thread needs to load 8 elements and we load 1 (sizePerThread) per global.load.lds
+    // Each thread needs to load 8 elements and we load 1 (sizePerThread) per buffer load instruction
     // CHECK: rocdl.make.buffer.rsrc %arg1
     // CHECK-NOT: rocdl.make.buffer.rsrc
     // CHECK-COUNT-8: rocdl.raw.ptr.buffer.load.lds
@@ -34,7 +34,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     %1 = tt.splat %arg3: i32 -> tensor<64xi32, #ttg.slice<{dim = 0, parent = #blocked}>>
     %2 = tt.expand_dims %1 {axis = 0 : i32} : tensor<64xi32, #ttg.slice<{dim = 0, parent = #blocked}>> -> tensor<1x64xi32, #blocked>
     %3 = tt.broadcast %2 : tensor<1x64xi32, #blocked> -> tensor<32x64xi32, #blocked>
-    // Each thread needs to load 8 elements and we load 1 (sizePerThread) per global.load.lds
+    // Each thread needs to load 8 elements and we load 2 (sizePerThread) per buffer load instruction
     // CHECK: rocdl.make.buffer.rsrc
     // CHECK-NOT: rocdl.make.buffer.rsrc
     // CHECK-COUNT-4: rocdl.raw.ptr.buffer.load.lds
@@ -60,7 +60,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     %2 = tt.expand_dims %1 {axis = 0 : i32} : tensor<64xi32, #ttg.slice<{dim = 0, parent = #blocked}>> -> tensor<1x64xi32, #blocked>
     %3 = tt.broadcast %2 : tensor<1x64xi32, #blocked> -> tensor<32x64xi32, #blocked>
 
-    // Each thread needs to load 8 elements and we load 8 (sizePerThread) per global.load.lds
+    // Each thread needs to load 8 elements and we load 8 (sizePerThread) per buffer load instruction
     // GFX950: rocdl.make.buffer.rsrc
     // GFX950-NOT: rocdl.make.buffer.rsrc
     // GFX950: rocdl.raw.ptr.buffer.load.lds
@@ -106,7 +106,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
     %70 = tt.splat %31 : i1 -> tensor<32x32xi1, #blocked>
     %71 = arith.andi %70, %67 : tensor<32x32xi1, #blocked>
 
-    // Each thread needs to load 4 elements and we load 1 (sizePerThread) per global.load.lds
+    // Each thread needs to load 4 elements and we load 1 (sizePerThread) per buffer load instruction
     // Note that mask/other alignment is 1 so we need 4 conditionals
 
     // CHECK: rocdl.raw.ptr.buffer.load.lds

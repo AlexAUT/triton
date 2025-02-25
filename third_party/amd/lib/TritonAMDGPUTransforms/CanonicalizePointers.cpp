@@ -1113,10 +1113,10 @@ public:
         rewriter, fatPtrBase, fatPtrOffset, curLoc, fatPtrAttrs);
 
     if (op->getNumResults())
-      op = rewriter.replaceOpWithNewOp<SourceOp>(
+      rewriter.replaceOpWithNewOp<SourceOp>(
           op, op->getResultTypes(), ValueRange{operands}, op->getAttrs());
     else
-      op = rewriter.replaceOpWithNewOp<SourceOp>(
+      rewriter.replaceOpWithNewOp<SourceOp>(
           op, TypeRange{}, ValueRange{operands}, op->getAttrs());
     return success();
   }

@@ -393,15 +393,11 @@ struct BufferLoadOpConversion
 struct BufferLoadToLocalOpConversion
     : public ConvertOpToLLVMPattern<triton::amdgpu::BufferLoadToLocalOp>,
       public LoadStoreConversionBase {
-  using ConvertOpToLLVMPattern<
-      triton::amdgpu::BufferLoadToLocalOp>::ConvertOpToLLVMPattern;
-
   BufferLoadToLocalOpConversion(LLVMTypeConverter &converter,
                                 const AMD::TargetInfo &targetInfo,
                                 ModuleAxisInfoAnalysis &axisAnalysisPass,
                                 PatternBenefit benefit)
-      : ConvertOpToLLVMPattern<triton::amdgpu::BufferLoadToLocalOp>(converter,
-                                                                    benefit),
+      : ConvertOpToLLVMPattern(converter, benefit),
         LoadStoreConversionBase(targetInfo, axisAnalysisPass) {}
 
   LogicalResult
@@ -471,9 +467,10 @@ struct BufferLoadToLocalOpConversion
     assert(ok);
 
     int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
-    if (!llvm::is_contained(targetInfo.supportedLoadWidthsToLds(), vecBits)) {
+    if (!llvm::is_contained(targetInfo.supportedDirectToLdsWidths(), vecBits)) {
       return rewriter.notifyMatchFailure(
-          op, "Async copy does not support the required load vectorization");
+          op, "Buffer load to local does not support the required load "
+              "vectorization");
     }
 
     int vecBytes = vecBits / 8;
@@ -577,7 +574,7 @@ struct AsyncCopyGlobalToLocalOpConversion
     assert(ok);
 
     int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
-    if (!llvm::is_contained(targetInfo.supportedLoadWidthsToLds(), vecBits)) {
+    if (!llvm::is_contained(targetInfo.supportedDirectToLdsWidths(), vecBits)) {
       return rewriter.notifyMatchFailure(
           op, "Async copy does not support the required load vectorization");
     }

@@ -468,7 +468,7 @@ void TargetInfo::storeOpAnnotation(triton::gpu::LocalStoreOp op,
   storeOpSchedAnnotations(op, localStoreOpCount, type);
 }
 
-SmallVector<unsigned> TargetInfo::supportedLoadWidthsToLds() const {
+SmallVector<unsigned> TargetInfo::supportedDirectToLdsWidths() const {
   switch (getISAFamily()) {
   case ISAFamily::CDNA1:
   case ISAFamily::CDNA2:

@@ -75,7 +75,7 @@ public:
   void storeOpAnnotation(triton::gpu::LocalStoreOp op, size_t localStoreOpCount,
                          Type type) const override;
 
-  SmallVector<unsigned> supportedLoadWidthsToLds() const;
+  SmallVector<unsigned> supportedDirectToLdsWidths() const;
 
 private:
   void printfImpl(Value formatStrStart, int formatStrByteCount, ValueRange args,
