@@ -424,27 +424,24 @@ struct BufferLoadToLocalOpConversion
     Value llOther = adaptor.getOther();
     Value llStride = adaptor.getStride();
 
+    RankedTensorType ptrType =
+        dyn_cast<RankedTensorType>(getPointerTypeWithShape(ptr, offset));
+    assert(ptrType);
+    unsigned numElems = getTotalElemsPerThread(ptrType);
+
     // We can load N elements at a time if:
     //  1. Every group of N source pointers are contiguous.  For example, if
     //     N=2, then the pointers should be [x, x+1, y, y+1, ...].
     //  2. The mask (if present) has "alignment" N, meaning that each group of N
     //     mask bits are the same.  For example if N=2, the mask must be
     //     [x, x, y, y, ...].
-    RankedTensorType ptrType =
-        dyn_cast<RankedTensorType>(getPointerTypeWithShape(ptr, offset));
-    assert(ptrType);
-    unsigned numElems = getTotalElemsPerThread(ptrType);
     unsigned vec = getVectorSize(ptr, offset, axisAnalysisPass);
-
-    // Get the offset
-    SmallVector<Value> offsetElems = unpackLLElements(loc, llOffset, rewriter);
-    assert(offsetElems.size() == numElems);
-
-    // Get the mask
     SmallVector<Value> maskElems =
         getMaskElemsAndUpdateVeclen(rewriter, loc, llMask, mask, vec);
 
-    // Get the `other` value (if any)
+    SmallVector<Value> offsetElems = unpackLLElements(loc, llOffset, rewriter);
+    assert(offsetElems.size() == numElems);
+
     SmallVector<Value> otherElems;
     if (llOther)
       otherElems = unpackLLElements(loc, llOther, rewriter);
@@ -458,13 +455,11 @@ struct BufferLoadToLocalOpConversion
                                          "does not write coalesced into LDS");
     }
 
-    // Create the resource descriptor and then emit the buffer_loads to lds
-    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
-
     auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
     auto smemObj = mlir::LLVM::getSharedMemoryObjectFromStruct(
         loc, llDst, resElemTy, rewriter);
 
+    // Addresses to store into, one per `vecTy`.
     VectorType vecTy;
     SmallVector<Value> shmemAddrs;
     bool ok = emitTransferBetweenRegistersAndShared(
@@ -484,6 +479,9 @@ struct BufferLoadToLocalOpConversion
     int vecBytes = vecBits / 8;
     assert(llvm::isPowerOf2_32(vecBytes));
     Value vecBytesVal = b.i32_val(vecBytes);
+
+    // Create the resource descriptor and then emit the buffer_loads to lds
+    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
 
     for (int i = 0; i < shmemAddrs.size(); i++) {
       auto srcIdx = i * vec;
