@@ -247,10 +247,17 @@ LogicalResult BufferLoadToLocalOp::verify() {
   if (!other)
     return success();
 
+  // Other should have the same data type as the ptr and the same shape/layout
+  // as offsets
   auto srcTy = LLVM::AMD::getPointerTypeWithShape(getPtr(), getOffsets());
-  if (other.getType() != srcTy)
+  Type elemTy = getPtr().getType().getPointeeType();
+  auto offsetType = cast<RankedTensorType>(getOffsets().getType());
+  auto expectedType = offsetType.cloneWith(std::nullopt, elemTy);
+
+  if (other.getType() != expectedType)
     return emitError("other type must share the datatype with ptr and the "
-                     "shape and encoding of offsets");
+                     "shape and encoding of offsets")
+           << "got: " << srcTy << " and " << other.getType();
 
   return success();
 }
