@@ -5,7 +5,6 @@ import statistics
 import subprocess
 import sys
 import time
-import torch
 from contextlib import contextmanager
 from typing import Any, Dict, List
 from . import language as tl
@@ -168,6 +167,7 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
     n_repeat = max(1, int(rep / estimate_gpu_ms))
     start_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
     end_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
+    sleep_kernel = runtime.driver.active.get_sleep_kernel()
     # Warm-up
     for _ in range(n_warmup):
         fn()
@@ -179,9 +179,11 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
         if grad_to_none is not None:
             for x in grad_to_none:
                 x.grad = None
-        # we sleep (conservatively) based on the cpu vs gpu time to avoid bubbles between the timing event and the kernel launch
-        if estimate_cpu_ms > 0.5 * estimate_gpu_ms:
-            torch.cuda._sleep(int(estimate_cpu_ms * 1_000_000))
+        # For fast kernels we need to keep the GPU busy or we will measure the cpu time between the timing event and the kernel launch
+        # We do this conservatively because estimate_gpu_ms is an overestimation
+        sleep_ms = estimate_cpu_ms - (0.5 * estimate_gpu_ms)
+        if sleep_ms > 0.0:
+            sleep_kernel(int(estimate_cpu_ms * 1_000_000))
         # we clear the L2 cache before each run
         runtime.driver.active.clear_cache(cache)
         # record time of `fn`
