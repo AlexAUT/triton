@@ -301,7 +301,18 @@ void StreamPipeliner::createStreamCopy(tt::LoadOp loadOp, Value alloc,
   auto srcTy = dyn_cast<triton::gpu::TensorOrMemDesc>(src.getType());
   assert(srcTy);
   bool useAsyncCopy = false;
-  if (triton::tools::getBoolEnv("AMDGCN_USE_ASYNC_COPY") &&
+
+  // Hide it behind env variable and only use it for numStages==3. For
+  // numStages==2 we have correctness issues.
+  //   For numStages==2 we need 2 barriers one to wait with the local_reads
+  // until the AsyncCopy has completed for the whole WG and then another after
+  // the local_reads to guard against the AsyncCopy of the next iteration
+  // (prefetch). Overall this 2-way dependency limits the ability to hide the
+  // AsyncCopies with other instructions.
+  //   For numStages==3 we do not have to this dependency as the we have 2 LDS
+  //   buffers so we can prefetch the next iteration into lds while reading the
+  //   current iteration
+  if (triton::tools::getBoolEnv("AMDGCN_USE_ASYNC_COPY") && numStages > 2 &&
       llvm::equal(sharedEncodingAttr.getOrder(), ttg::getOrder(srcTy))) {
     useAsyncCopy = true;
     LDBG("Emit async copy for: " << *loadOp);
