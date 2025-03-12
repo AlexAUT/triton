@@ -83,7 +83,8 @@ public:
     }
 
     auto order = sharedEncoding.getOrder();
-    unsigned warpSize = ttg::getWarpSize(srcTy.getEncoding());
+    // unsigned warpSize = product(ttg::getThreadsPerWarp(srcTy.getEncoding()));
+    unsigned warpSize = 64; // FIXME: lookup warp size
 
     llvm::SmallVector<unsigned, 2> sizePerThread{1, 1};
     llvm::SmallVector<unsigned, 2> threadsPerWarp{1, 1};
