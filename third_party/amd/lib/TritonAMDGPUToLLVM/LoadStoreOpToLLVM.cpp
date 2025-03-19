@@ -555,8 +555,6 @@ struct BufferLoadToLocalOpConversion
         int elementBytes = vecBytes / vecTy.getNumElements();
         Value diff = b.sdiv(b.sub(src1Ptr, src2Ptr), b.i32_val(elementBytes));
         auto newOffset = b.add(offsetIn, diff);
-        // auto newSrcPtr =
-        //     b.gep(srcPtr.getType(), dstTy.getElementType(), srcPtr, diff);
 
         Value pred = mask ? maskElems[srcIdx] : b.int_val(1, 1);
         bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc, newOffset,
@@ -749,8 +747,9 @@ struct AsyncCopyGlobalToLocalOpConversion
         int elementBytes = vecBytes / vecTy.getNumElements();
         Value diff = b.sdiv(b.sub(src1Ptr, src2Ptr), b.i32_val(elementBytes));
         Value diffAsFloat = b.inttofloat(f32_ty, diff);
-        auto newSrcPtr =
-            b.gep(srcPtr.getType(), dstTy.getElementType(), srcPtr, diff);
+        Value newSrcPtr =
+            b.gep(srcPtr.getType(), rewriter.getIntegerType(elementBytes * 8),
+                  srcPtr, diff);
 
         if (maskElements.empty()) {
           rewriter.create<ROCDL::GlobalLoadLDSOp>(
