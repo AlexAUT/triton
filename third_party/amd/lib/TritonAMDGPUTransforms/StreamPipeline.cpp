@@ -236,7 +236,8 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   numBuffers =
       std::max(1, stages[SCHED_LOCAL_LOAD] - stages[SCHED_LOCAL_STORE]);
 
-  // If we use AsyncCopy we need one more buffer to be to double buffer
+  // If we use AsyncCopy we need one more buffer since we are not using a
+  // register buffer
   if (useAsyncCopy)
     numBuffers = numStages;
 
@@ -296,8 +297,6 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
 bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
                                       Value extractIdx) {
   OpBuilder builder(forOp);
-  Value zero = builder.create<arith::ConstantIntOp>(forOp.getLoc(), 0, 32);
-  // Replace the load with insert/extract slice.
   builder.setInsertionPoint(loadOp);
   Location loc = loadOp.getLoc();
   Value src = loadOp.getPtr();
@@ -311,12 +310,14 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
   auto srcTy = dyn_cast<triton::gpu::TensorOrMemDesc>(src.getType());
   assert(srcTy);
 
-  if (!useAsyncCopy || // numStages > 2 &&
+  if (!useAsyncCopy || sharedEncodingAttr.getMaxPhase() != 1 ||
+      sharedEncodingAttr.getPerPhase() != 1 ||
       !llvm::equal(sharedEncodingAttr.getOrder(), ttg::getOrder(srcTy))) {
     return false;
   }
 
-  // Extract part.
+  // Extract local subview from shared allocation
+  Value zero = builder.create<arith::ConstantIntOp>(forOp.getLoc(), 0, 32);
   SmallVector<Value> loadOffsets(allocTy.getRank(), zero);
   loadOffsets[0] = extractIdx;
   auto sharedMemorySpace = ttg::SharedMemorySpaceAttr::get(forOp.getContext());
@@ -325,6 +326,7 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
       allocTy.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
   auto viewLoad =
       builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
+
   // Clean up old local caches.
   SmallVector<ttg::LocalAllocOp> allocsToErase;
   for (Operation *user : loadOp->getUsers()) {
@@ -346,20 +348,14 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
       builder.create<ttg::AsyncCommitGroupOp>(loc, newLoadOp->getResult(0));
   ttg::AsyncWaitOp wait =
       builder.create<ttg::AsyncWaitOp>(loc, commit->getResult(0), 0);
-  scheduleOp(commit, SCHED_LOCAL_LOAD);
-  scheduleOp(wait, SCHED_LOCAL_LOAD);
 
   schedule.erase(loadOp);
   schedule.insert(newLoadOp, stage, cluster);
 
-  // Prefetch load ahead of the dot stage if is used by the dot.
-  Operation *storeOp{};
-
-  // FIXME: this should be double buffer or not
+  // For numStages==2 make sure the AsyncCopy (prefetch) is scheduled after the
+  // AsyncWait or otherwise we will require another barrier
   if (numStages == 2)
-    scheduleOp(newLoadOp, SCHED_LOCAL_LOAD);
-  else
-    scheduleOp(newLoadOp, SCHED_LOCAL_LOAD);
+    scheduleOp(newLoadOp, SCHED_LOCAL_STORE);
 
   // Create local load
   auto sharedLoad = builder.create<ttg::LocalLoadOp>(
@@ -367,17 +363,6 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
   Value result = sharedLoad.getResult();
   if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE])
     scheduleOp(sharedLoad, SCHED_LOCAL_LOAD);
-
-  // FIXME: maybe we should move others here
-
-  // If the currently processed `LoadOp` is labeled with an index regarding
-  // to which `DotOp` operand the corresponding data belongs to, then label the
-  // expanded `LocalStoreOp` with the same index. This is required for
-  // instruction scheduling hints to correctly count the emitted `ds_write`
-  // instructions for each GEMM tile.
-  if (auto attr = loadOp->getAttr(tt::amdgpu::OpIdxAttr::getMnemonic())) {
-    newLoadOp->setAttr(tt::amdgpu::OpIdxAttr::getMnemonic(), attr);
-  }
 
   loadOp->replaceAllUsesWith(ValueRange{result});
 

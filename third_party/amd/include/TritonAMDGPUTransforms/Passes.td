@@ -167,11 +167,13 @@ def TritonAMDGPUBlockPingpong: Pass<"tritonamdgpu-block-pingpong", "mlir::Module
 }
 
 def TritonAMDGPUCoalesceAsyncCopy: Pass<"tritonamdgpu-coalesce-async-copy", "mlir::ModuleOp"> {
-  let summary = "Adjusts layout of async copy to have coalesced writes";
+  let summary = "Improve coalescing for async global to local copies";
 
   let description = [{
-    This pass alters the src layout of Async Copy Ops to ensure coalesced writes into LDS as required by the
-    global.load.lds instructions on GFX9.
+    GFX9:
+      For AsyncCopyGlobalToLocal ops where the blocked encoding's sizePerThread is larger than the supported load
+      vector size we clip it to the largest supported size. This ensures we get coalesced writes to shared memory as
+      required by the hardware. Does only work for non swizzled shared memory layouts
   }];
 
   let constructor = "mlir::createTritonAMDGPUCoalesceAsyncCopy()";
