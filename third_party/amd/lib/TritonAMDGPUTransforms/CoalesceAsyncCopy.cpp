@@ -1,5 +1,8 @@
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
+#include "amd/lib/TritonAMDGPUToLLVM/Utility.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "triton/Analysis/AxisInfo.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
@@ -14,31 +17,14 @@ namespace ttg = triton::gpu;
 
 struct CoalesceAsyncCopySharedWrites
     : public OpRewritePattern<ttg::AsyncCopyGlobalToLocalOp> {
-  CoalesceAsyncCopySharedWrites(triton::AMD::ISAFamily isaFamiliy,
-                                MLIRContext *ctx)
-      : OpRewritePattern(ctx), isaFamily{isaFamiliy} {}
-
-  llvm::SmallVector<unsigned, 8>
-  supportedAsyncLoadBitWidths(triton::AMD::ISAFamily isaFamily) const {
-    switch (isaFamily) {
-    case triton::AMD::ISAFamily::CDNA1:
-    case triton::AMD::ISAFamily::CDNA2:
-    case triton::AMD::ISAFamily::CDNA3:
-      return {32};
-    case triton::AMD::ISAFamily::CDNA4:
-      return {32, 128};
-    default:
-      return {};
-    }
-  }
-
+  CoalesceAsyncCopySharedWrites(const triton::AMD::TargetInfo &targetInfo,
+                                MLIRContext *ctx,
+                                triton::ModuleAxisInfoAnalysis &axisAnalysis)
+      : OpRewritePattern(ctx), targetInfo{targetInfo},
+        axisAnalysis(axisAnalysis) {}
   // On gfx9 global and buffer loads directly to lds need to write coalesced
-  // into LDS so we need to ensure that the src and dst layout result in
-  // coalsced writes.
-  // We can simply set the sizePerThread in the fastest dimension to the
-  // supported load width and adjust threadsPerWarp to exhaust the whole fastest
-  // dimension
-  // FIXME: support rank > 2
+  // into LDS. This means the contigous elements owned by a thread cannot exceed
+  // the supported load width from the hardware.
   LogicalResult matchAndRewrite(ttg::AsyncCopyGlobalToLocalOp asyncCopy,
                                 PatternRewriter &rewriter) const override {
     auto src = asyncCopy.getSrc();
@@ -46,89 +32,85 @@ struct CoalesceAsyncCopySharedWrites
     Value mask = asyncCopy.getMask();
     Value other = asyncCopy.getOther();
 
+    // Skip the AsyncCopy if we already adjusted the layout (axis analysis will
+    // be unvailable for added cvtLayout)
+    if (axisAnalysis.getAxisInfo(src) == nullptr) {
+      return rewriter.notifyMatchFailure(asyncCopy, "already adjusted layout");
+    }
+
     auto srcTy = cast<RankedTensorType>(src.getType());
     auto dstTy = cast<ttg::MemDescType>(dst.getType());
 
-    auto srcEncoding = dyn_cast<ttg::BlockedEncodingAttr>(srcTy.getEncoding());
-    if (!srcEncoding) {
+    auto blockedEnc = dyn_cast<ttg::BlockedEncodingAttr>(srcTy.getEncoding());
+    if (!blockedEnc) {
       return rewriter.notifyMatchFailure(asyncCopy,
                                          "src encoding must be #blocked");
     }
 
-    auto sharedEncoding =
+    auto sharedEnc =
         dyn_cast<ttg::SwizzledSharedEncodingAttr>(dstTy.getEncoding());
-    if (!sharedEncoding) {
+    if (!sharedEnc) {
       return rewriter.notifyMatchFailure(
-          asyncCopy, "destination encoding must be SwizzledShared");
+          asyncCopy, "destination encoding must be #SwizzledShared");
     }
 
-    auto shape = dstTy.getShape();
-    if (shape.size() > 2) {
-      return rewriter.notifyMatchFailure(asyncCopy->getLoc(),
-                                         " does only support 2D shapes");
-    }
-
-    auto order = sharedEncoding.getOrder();
-    int warpSize = ttg::TritonGPUDialect::getThreadsPerWarp(
-        asyncCopy->getParentOfType<ModuleOp>());
-
-    llvm::SmallVector<unsigned, 2> sizePerThread{1, 1};
-    llvm::SmallVector<unsigned, 2> threadsPerWarp{1, 1};
-
-    auto supportedBitWidths = supportedAsyncLoadBitWidths(isaFamily);
-    unsigned elemBitWidth = dstTy.getElementTypeBitWidth();
-
-    // Try all supported widths, we reverse to start from the larger sizes
-    bool foundCoalescedConfig = false;
-    for (unsigned bitsPerLoad : llvm::reverse(supportedBitWidths)) {
-      unsigned elemBitWidth = dstTy.getElementTypeBitWidth();
-      // Skip if the load width is not a multiple of element (covers smaller
-      // than elemBitWidth)
-      if ((bitsPerLoad % elemBitWidth) != 0)
-        continue;
-
-      // To ensure coalesced writes each threads holds a load width chunk of
-      // data in the fastest dimension
-      sizePerThread[order[0]] = bitsPerLoad / elemBitWidth;
-      // We exhaust the fastest dimension and overlow into the second dim
-      threadsPerWarp[order[0]] = std::min<unsigned>(
-          warpSize, shape[order[0]] / sizePerThread[order[0]]);
-      threadsPerWarp[order[1]] =
-          std::max<unsigned>(1, warpSize / threadsPerWarp[order[0]]);
-
-      foundCoalescedConfig = true;
-      break;
-    }
-    if (!foundCoalescedConfig) {
+    if (sharedEnc.getMaxPhase() > 1) {
+      llvm::outs() << "Fail3\n";
       return rewriter.notifyMatchFailure(
-          asyncCopy, "Failed to find a blocked layout configuration "
-                     "resulting in coalesced writes");
+          asyncCopy, "swizzled shared encoding not supported");
     }
 
-    // Return if we already use the found layout
-    if (sizePerThread == srcEncoding.getSizePerThread() &&
-        threadsPerWarp == srcEncoding.getThreadsPerWarp()) {
-      return rewriter.notifyMatchFailure(asyncCopy, "already coalesced");
+    // Get the minimum contiguity based on the src and mask
+    unsigned maxVectorSize = mlir::LLVM::AMD::getContiguity(src, axisAnalysis);
+    if (mask) {
+      maxVectorSize = std::min<unsigned>(maxVectorSize,
+                                         axisAnalysis.getMaskAlignment(mask));
     }
 
-    auto newLayout = ttg::BlockedEncodingAttr::get(
-        asyncCopy->getContext(), sizePerThread, threadsPerWarp,
-        ttg::getWarpsPerCTA(srcEncoding), ttg::getOrder(srcTy),
-        ttg::getCTALayout(srcEncoding));
+    // Look for the clostest supported load width supported by the hardware
+    auto elemBitWidth = dstTy.getElementTypeBitWidth();
+    while (maxVectorSize > 0 && !targetInfo.supportsDirectToLdsLoadBitWidth(
+                                    maxVectorSize * elemBitWidth)) {
+      maxVectorSize /= 2;
+    }
 
-    auto convertLayout = [&rewriter](auto loc, Value old, auto newLayout) {
+    if (maxVectorSize == 0) {
+      return rewriter.notifyMatchFailure(
+          asyncCopy, "could not find layout config to create coalesced writes");
+    }
+
+    auto contigPerThread = ttg::getContigPerThread(srcTy);
+    auto blockedContig = contigPerThread[blockedEnc.getOrder()[0]];
+    if (blockedContig == maxVectorSize) {
+      return rewriter.notifyMatchFailure(asyncCopy,
+                                         "already using the correct layout");
+    }
+
+    // Get new blocked encoding based on max vector size
+    int numWarps = triton::gpu::lookupNumWarps(asyncCopy);
+    auto mod = asyncCopy->getParentOfType<ModuleOp>();
+    int threadsPerWarp = ttg::TritonGPUDialect::getThreadsPerWarp(mod);
+    contigPerThread[blockedEnc.getOrder()[0]] = maxVectorSize;
+    auto newBlockEnc = BlockedEncodingAttr::get(
+        asyncCopy.getContext(), srcTy.getShape(), contigPerThread,
+        blockedEnc.getOrder(), numWarps, threadsPerWarp,
+        blockedEnc.getCTALayout());
+
+    // Convert layout of src, mask and other to new encoding
+    auto convertLayout = [&rewriter](auto loc, Value old, auto newEnc) {
       auto oldTy = cast<RankedTensorType>(old.getType());
       RankedTensorType newSrcTy = RankedTensorType::get(
-          oldTy.getShape(), oldTy.getElementType(), newLayout);
+          oldTy.getShape(), oldTy.getElementType(), newEnc);
       return rewriter.create<ttg::ConvertLayoutOp>(loc, newSrcTy, old);
     };
 
     auto loc = asyncCopy->getLoc();
-    auto cvtSrc = convertLayout(loc, src, newLayout);
+    Value cvtSrc = convertLayout(loc, src, newBlockEnc);
+
     if (mask)
-      mask = convertLayout(loc, mask, newLayout);
+      mask = convertLayout(loc, mask, newBlockEnc);
     if (other)
-      other = convertLayout(loc, other, newLayout);
+      other = convertLayout(loc, other, newBlockEnc);
 
     rewriter.modifyOpInPlace(asyncCopy, [&]() {
       asyncCopy.getSrcMutable().assign(cvtSrc);
@@ -142,28 +124,34 @@ struct CoalesceAsyncCopySharedWrites
   }
 
 private:
-  triton::AMD::ISAFamily isaFamily;
+  const triton::AMD::TargetInfo &targetInfo;
+  triton::ModuleAxisInfoAnalysis &axisAnalysis;
 };
 
 class TritonAMDGPUCoalesceAsyncCopyPass
     : public TritonAMDGPUCoalesceAsyncCopyBase<
           TritonAMDGPUCoalesceAsyncCopyPass> {
 public:
-  TritonAMDGPUCoalesceAsyncCopyPass(std::string_view archGenName)
-      : isaFamily(triton::AMD::deduceISAFamily(archGenName)) {}
+  TritonAMDGPUCoalesceAsyncCopyPass(std::string archGenName) {
+    this->archGenerationName = std::move(archGenName);
+  }
 
   void runOnOperation() override {
     ModuleOp m = getOperation();
     MLIRContext *context = &getContext();
 
+    triton::AMD::TargetInfo targetInfo(archGenerationName);
+    triton::ModuleAxisInfoAnalysis axisInfoAnalysis(m);
+
     mlir::RewritePatternSet patterns(context);
 
-    switch (isaFamily) {
+    switch (targetInfo.getISAFamily()) {
     case triton::AMD::ISAFamily::CDNA1:
     case triton::AMD::ISAFamily::CDNA2:
     case triton::AMD::ISAFamily::CDNA3:
     case triton::AMD::ISAFamily::CDNA4:
-      patterns.add<CoalesceAsyncCopySharedWrites>(isaFamily, context);
+      patterns.add<CoalesceAsyncCopySharedWrites>(targetInfo, context,
+                                                  axisInfoAnalysis);
       break;
     default:
       break;
@@ -172,12 +160,10 @@ public:
     if (applyPatternsGreedily(m, std::move(patterns)).failed())
       signalPassFailure();
   }
-
-private:
-  triton::AMD::ISAFamily isaFamily;
 };
 
 std::unique_ptr<Pass>
-mlir::createTritonAMDGPUCoalesceAsyncCopy(const std::string archGenName) {
-  return std::make_unique<TritonAMDGPUCoalesceAsyncCopyPass>(archGenName);
+mlir::createTritonAMDGPUCoalesceAsyncCopy(std::string archGenName) {
+  return std::make_unique<TritonAMDGPUCoalesceAsyncCopyPass>(
+      std::move(archGenName));
 }

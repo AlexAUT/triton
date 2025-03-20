@@ -166,19 +166,16 @@ def TritonAMDGPUBlockPingpong: Pass<"tritonamdgpu-block-pingpong", "mlir::Module
   let dependentDialects = ["mlir::ROCDL::ROCDLDialect, mlir::triton::amdgpu::TritonAMDGPUDialect"];
 }
 
-def TritonAMDGPUCoalesceAsyncCopy: Pass<"tritonamdgpu-coalesce-async-copy", "mlir::ModuleOp"> {
-  let summary = "Improve coalescing for async global to local copies";
+def TritonAMDGPUCoalesceAsyncCopy: Pass<"tritonamdgpu-coalesce-async", "mlir::ModuleOp"> {
 
-  let description = [{
-    GFX9:
-      For AsyncCopyGlobalToLocal ops where the blocked encoding's sizePerThread is larger than the supported load
-      vector size we clip it to the largest supported size. This ensures we get coalesced writes to shared memory as
-      required by the hardware. Does only work for non swizzled shared memory layouts
-  }];
+
+  let summary = "Convert memory operations to buffer operations";
+
+  let description = "This pass converts memory and atomic operations (e.g., tt.load/tt.store/tt.atomic_rmw) to  amdgpu buffer operations, if possible";
 
   let constructor = "mlir::createTritonAMDGPUCoalesceAsyncCopy()";
 
-  let dependentDialects = [];
+  let dependentDialects = ["mlir::triton::amdgpu::TritonAMDGPUDialect"];
 
   let options = [
     Option<"archGenerationName", "arch-generation-name",
