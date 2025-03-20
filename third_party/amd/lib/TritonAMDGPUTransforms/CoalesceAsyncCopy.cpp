@@ -42,55 +42,52 @@ struct CoalesceAsyncCopySharedWrites
     auto dstTy = cast<ttg::MemDescType>(dst.getType());
 
     auto blockedEnc = dyn_cast<ttg::BlockedEncodingAttr>(srcTy.getEncoding());
-    if (!blockedEnc) {
+    if (!blockedEnc)
       return rewriter.notifyMatchFailure(asyncCopy,
                                          "src encoding must be #blocked");
-    }
 
     auto sharedEnc =
         dyn_cast<ttg::SwizzledSharedEncodingAttr>(dstTy.getEncoding());
-    if (!sharedEnc) {
+    if (!sharedEnc)
       return rewriter.notifyMatchFailure(
           asyncCopy, "destination encoding must be #SwizzledShared");
-    }
-
-    if (sharedEnc.getMaxPhase() > 1) {
-      llvm::outs() << "Fail3\n";
+    if (sharedEnc.getMaxPhase() > 1)
       return rewriter.notifyMatchFailure(
           asyncCopy, "swizzled shared encoding not supported");
-    }
 
-    // Get the minimum contiguity based on the src and mask
-    unsigned maxVectorSize = mlir::LLVM::AMD::getContiguity(src, axisAnalysis);
+    // Get the minimum contiguity based on the src and mask contiguity and
+    // alignment
+    unsigned loadContig = mlir::LLVM::AMD::getContiguity(src, axisAnalysis);
     if (mask) {
-      maxVectorSize = std::min<unsigned>(maxVectorSize,
-                                         axisAnalysis.getMaskAlignment(mask));
+      loadContig =
+          std::min<unsigned>(loadContig, axisAnalysis.getMaskAlignment(mask));
     }
 
-    // Look for the clostest supported load width supported by the hardware
+    // Look for the closest supported load width
     auto elemBitWidth = dstTy.getElementTypeBitWidth();
-    while (maxVectorSize > 0 && !targetInfo.supportsDirectToLdsLoadBitWidth(
-                                    maxVectorSize * elemBitWidth)) {
-      maxVectorSize /= 2;
+    while (loadContig > 0 && !targetInfo.supportsDirectToLdsLoadBitWidth(
+                                 loadContig * elemBitWidth)) {
+      loadContig /= 2;
     }
 
-    if (maxVectorSize == 0) {
+    if (loadContig == 0) {
       return rewriter.notifyMatchFailure(
           asyncCopy, "could not find layout config to create coalesced writes");
     }
 
+    // Do not rewrite if we already use the correct contig
     auto contigPerThread = ttg::getContigPerThread(srcTy);
     auto blockedContig = contigPerThread[blockedEnc.getOrder()[0]];
-    if (blockedContig == maxVectorSize) {
+    if (blockedContig == loadContig) {
       return rewriter.notifyMatchFailure(asyncCopy,
                                          "already using the correct layout");
     }
 
     // Get new blocked encoding based on max vector size
+    contigPerThread[blockedEnc.getOrder()[0]] = loadContig;
     int numWarps = triton::gpu::lookupNumWarps(asyncCopy);
     auto mod = asyncCopy->getParentOfType<ModuleOp>();
     int threadsPerWarp = ttg::TritonGPUDialect::getThreadsPerWarp(mod);
-    contigPerThread[blockedEnc.getOrder()[0]] = maxVectorSize;
     auto newBlockEnc = BlockedEncodingAttr::get(
         asyncCopy.getContext(), srcTy.getShape(), contigPerThread,
         blockedEnc.getOrder(), numWarps, threadsPerWarp,
