@@ -48,9 +48,10 @@ struct CoalesceAsyncCopyWrites
     if (!sharedEnc)
       return rewriter.notifyMatchFailure(
           copyOp, "destination encoding must be #SwizzledShared");
-    if (sharedEnc.getMaxPhase() > 1)
-      return rewriter.notifyMatchFailure(
-          copyOp, "swizzled shared encoding not supported");
+    // We only swizzle inside a warp so we can apply the same rules and then
+    // modify the global ptrs in the end if (sharedEnc.getMaxPhase() > 1)
+    //   return rewriter.notifyMatchFailure(
+    //       copyOp, "swizzled shared encoding not supported");
 
     // We start from the precomputed contiguity we got from AxisAnalysis.
     unsigned loadContig = 0;

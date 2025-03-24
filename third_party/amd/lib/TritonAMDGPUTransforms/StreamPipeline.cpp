@@ -311,14 +311,6 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
   auto sharedEncodingAttr =
       cast<ttg::SwizzledSharedEncodingAttr>(allocTy.getEncoding());
 
-  // Skip swizzled shared encodings because they are not supported by the
-  // lowering to llvm
-  // TODO: remove once swizzle async copies are supported
-  if (sharedEncodingAttr.getMaxPhase() != 1 ||
-      sharedEncodingAttr.getPerPhase() != 1) {
-    return false;
-  }
-
   // Extract local subview from shared allocation
   Value zero = builder.create<arith::ConstantIntOp>(forOp.getLoc(), 0, 32);
   SmallVector<Value> loadOffsets(allocTy.getRank(), zero);
