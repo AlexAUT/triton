@@ -425,8 +425,10 @@ struct BufferLoadToLocalOpConversion
     auto dstTy = op.getDest().getType();
     if (!LLVM::AMD::canCoalesceWriteIntoSharedMemory(rewriter, ptrType, dstTy,
                                                      vec)) {
-      return rewriter.notifyMatchFailure(op,
-                                         "does not write coalesced into LDS");
+      return matchAndRewriteSwizzled(op, adaptor, rewriter);
+      // return rewriter.notifyMatchFailure(op,
+      //                                    "does not write coalesced into
+      //                                    LDS");
     }
 
     auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
@@ -469,6 +471,182 @@ struct BufferLoadToLocalOpConversion
       Value pred = mask ? maskElems[srcIdx] : b.true_val();
       bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc, offsetIn,
                                   shmemAddrs[i], pred, op.getCache());
+      if (!otherElems.empty()) {
+        Value storeVal = packElementRangeIntoVector(
+            rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
+        llStore(rewriter, loc, shmemAddrs[i], storeVal,
+                b.icmp_ne(maskElems[srcIdx], b.true_val()), op.getCache());
+      }
+    }
+
+    // Drop the result token.
+    Value zero = rewriter.create<LLVM::ConstantOp>(
+        op.getLoc(), IntegerType::get(op.getContext(), 32),
+        rewriter.getI32IntegerAttr(0));
+    rewriter.replaceOp(op, zero);
+    return success();
+  }
+
+  LogicalResult
+  matchAndRewriteSwizzled(triton::amdgpu::BufferLoadToLocalOp op,
+                          OpAdaptor adaptor,
+                          ConversionPatternRewriter &rewriter) const {
+    auto loc = op->getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    LLVM::AMD::BufferEmitter bufferEmitter(rewriter, loc, targetInfo);
+
+    // Original values
+    Value ptr = op.getPtr();
+    Value offset = op.getOffsets();
+    Value mask = op.getMask();
+
+    // Converted values
+    Value llPtr = adaptor.getPtr();
+    Value llOffset = adaptor.getOffsets();
+    Value llDst = adaptor.getDest();
+    Value llMask = adaptor.getMask();
+    Value llOther = adaptor.getOther();
+    Value llStride = adaptor.getStride();
+
+    RankedTensorType ptrType =
+        cast<RankedTensorType>(getPointerTypeWithShape(ptr, offset));
+    unsigned numElems = getTotalElemsPerThread(ptrType);
+
+    // We can load N elements at a time if:
+    //  1. Every group of N source pointers are contiguous.  For example, if
+    //     N=2, then the pointers should be [x, x+1, y, y+1, ...].
+    //  2. The mask (if present) has "alignment" N, meaning that each group of N
+    //     mask bits are the same.  For example if N=2, the mask must be
+    //     [x, x, y, y, ...].
+    unsigned vec = getVectorSize(ptr, offset, axisAnalysisPass);
+    SmallVector<Value> maskElems =
+        getMaskElemsAndUpdateVeclen(rewriter, loc, llMask, mask, vec);
+
+    SmallVector<Value> offsetElems = unpackLLElements(loc, llOffset, rewriter);
+    assert(offsetElems.size() == numElems);
+
+    SmallVector<Value> otherElems;
+    if (llOther)
+      otherElems = unpackLLElements(loc, llOther, rewriter);
+
+    // buffer_load into LDS does not support per lane offsets.
+    // We need to ensure that we write coalesced into shared memory.
+    auto dstTy = op.getDest().getType();
+
+    LinearLayout regLayout =
+        triton::gpu::toLinearLayout(ptrType.getShape(), ptrType.getEncoding());
+    LinearLayout sharedLayout =
+        triton::gpu::toLinearLayout(ptrType.getShape(), dstTy.getEncoding());
+
+    auto regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
+    auto sharedToRegLayout = sharedLayout.pseudoinvert();
+    auto comb = sharedLayout.invertAndCompose(regLayout);
+    llvm::outs() << "Shared encoding: " << dstTy.getEncoding()
+                 << "\nSrc: " << ptrType.getEncoding() << "\n";
+
+    if (!LLVM::AMD::canCoalesceWriteIntoSharedMemory(rewriter, ptrType, dstTy,
+                                                     vec)) {
+      // llvm::outs() << "non coalesced!\n";
+      // return rewriter.notifyMatchFailure(op,
+      //                                    "does not write coalesced into
+      //                                    LDS");
+    }
+
+    auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
+    auto smemObj = mlir::LLVM::getSharedMemoryObjectFromStruct(
+        loc, llDst, resElemTy, rewriter);
+
+    // We compute the lds offset for the swizzled and non swizzled layout. The
+    // diffeence tells us which lane holds the memory address we should read
+
+    // Create flat smem encoding
+    auto dstEnc = cast<SwizzledSharedEncodingAttr>(dstTy.getEncoding());
+    auto flatSharedEnc = SwizzledSharedEncodingAttr::get(
+        getContext(), dstEnc.getVec(), 1, 1, dstEnc.getOrder(),
+        dstEnc.getCTALayout());
+    auto flatDstTy = MemDescType::get(dstTy.getShape(), dstTy.getElementType(),
+                                      flatSharedEnc, dstTy.getMemorySpace());
+
+    // First we determine the vector size per load and collect the
+    // shared addresses. This will only emit the address calculation and not the
+    // actual loads
+    VectorType vecTy;
+    SmallVector<Value> flatShmemAddrs;
+    bool ok = emitTransferBetweenRegistersAndShared(
+        ptrType, flatDstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+        [&](VectorType vecTy_, Value shmemAddr) {
+          vecTy = vecTy_;
+          flatShmemAddrs.push_back(shmemAddr);
+        });
+    assert(ok);
+
+    SmallVector<Value> shmemAddrs;
+    ok = emitTransferBetweenRegistersAndShared(
+        ptrType, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+        [&](VectorType vecTy_, Value shmemAddr) {
+          vecTy = vecTy_;
+          shmemAddrs.push_back(shmemAddr);
+        });
+    assert(ok);
+
+    int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
+    if (!targetInfo.supportsDirectToLdsLoadBitWidth(vecBits)) {
+      llvm::outs() << "Wrong vector size!\n";
+      return rewriter.notifyMatchFailure(
+          op, "Buffer load to local does not support the required load vector "
+              "bitwidth" +
+                  std::to_string(vecBits));
+    }
+
+    int vecBytes = vecBits / 8;
+    assert(llvm::isPowerOf2_32(vecBytes));
+    Value vecBytesVal = b.i32_val(vecBytes);
+
+    // Create the resource descriptor and then emit the buffer_loads to lds
+    // based on the collected shared addresses and vector size
+    Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
+
+    for (int i = 0; i < shmemAddrs.size(); i++) {
+      auto srcIdx = i * vec;
+      auto offsetIn = offsetElems[srcIdx];
+
+      auto src1Ptr = b.ptrtoint(i32_ty, shmemAddrs[i]);
+      auto src2Ptr = b.ptrtoint(i32_ty, flatShmemAddrs[i]);
+      int elementBytes = vecBytes / vecTy.getNumElements();
+      // int elementBytes = vecBytes;
+      llvm::outs() << "ELement bytes: " << elementBytes << "\n";
+      llvm::outs() << "Vec bytes: " << vecBytes << "\n";
+      Value diff = b.sdiv(b.sub(src1Ptr, src2Ptr), b.i32_val(vecBytes));
+
+      Value newOffset = b.add(offsetIn, diff);
+
+      Value laneId = getLaneId(rewriter, loc);
+      Value selectLane = b.add(laneId, diff);
+      std::string intrinsic = "llvm.amdgcn.ds.bpermute";
+      auto laneOffset =
+          LLVM::createLLVMIntrinsicCallOp(
+              rewriter, loc, intrinsic, i32_ty,
+              ValueRange{
+                  b.mul(selectLane,
+                        b.i32_val(offsetIn.getType().getIntOrFloatBitWidth() /
+                                  8)),
+                  offsetIn})
+              ->getResult(0);
+
+      Value swizzledPred = mask ? maskElems[srcIdx] : b.true_val();
+      Value linearPred = swizzledPred;
+      if (mask) {
+        auto warpMask = targetInfo.ballot(rewriter, loc, rewriter.getI64Type(),
+                                          swizzledPred);
+        // Extract the selectLane bit
+        auto bitMask =
+            b.lshr(warpMask, b.zext(rewriter.getI64Type(), selectLane));
+        linearPred = b.trunc(rewriter.getIntegerType(1), bitMask);
+      }
+
+      bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc, laneOffset,
+                                  flatShmemAddrs[i], linearPred, op.getCache());
+
       if (!otherElems.empty()) {
         Value storeVal = packElementRangeIntoVector(
             rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
