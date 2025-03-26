@@ -420,15 +420,18 @@ struct BufferLoadToLocalOpConversion
     if (llOther)
       otherElems = unpackLLElements(loc, llOther, rewriter);
 
+    // Check if swizzled
+    auto dstTy = op.getDest().getType();
+    auto sharedEnc = cast<SwizzledSharedEncodingAttr>(dstTy.getEncoding());
+    if (sharedEnc.getPerPhase() != 1 || sharedEnc.getMaxPhase() != 1) {
+      // return matchAndRewriteSwizzled(op, adaptor, rewriter);
+    }
+
     // buffer_load into LDS does not support per lane offsets.
     // We need to ensure that we write coalesced into shared memory.
-    auto dstTy = op.getDest().getType();
     if (!LLVM::AMD::canCoalesceWriteIntoSharedMemory(rewriter, ptrType, dstTy,
                                                      vec)) {
       return matchAndRewriteSwizzled(op, adaptor, rewriter);
-      // return rewriter.notifyMatchFailure(op,
-      //                                    "does not write coalesced into
-      //                                    LDS");
     }
 
     auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
@@ -537,19 +540,13 @@ struct BufferLoadToLocalOpConversion
         triton::gpu::toLinearLayout(ptrType.getShape(), ptrType.getEncoding());
     LinearLayout sharedLayout =
         triton::gpu::toLinearLayout(ptrType.getShape(), dstTy.getEncoding());
-
     auto regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
-    auto sharedToRegLayout = sharedLayout.pseudoinvert();
-    auto comb = sharedLayout.invertAndCompose(regLayout);
-    llvm::outs() << "Shared encoding: " << dstTy.getEncoding()
-                 << "\nSrc: " << ptrType.getEncoding() << "\n";
 
-    if (!LLVM::AMD::canCoalesceWriteIntoSharedMemory(rewriter, ptrType, dstTy,
-                                                     vec)) {
-      // llvm::outs() << "non coalesced!\n";
-      // return rewriter.notifyMatchFailure(op,
-      //                                    "does not write coalesced into
-      //                                    LDS");
+    int threadsPerWarp = lookupThreadsPerWarp(rewriter);
+    if (!LLVM::AMD::doesSwizzleInsideWarp(rewriter, regToSharedLayout, vec,
+                                          threadsPerWarp)) {
+      return rewriter.notifyMatchFailure(
+          op, "swizzling shared addresses between warps is not supported");
     }
 
     auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
@@ -591,7 +588,6 @@ struct BufferLoadToLocalOpConversion
 
     int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
     if (!targetInfo.supportsDirectToLdsLoadBitWidth(vecBits)) {
-      llvm::outs() << "Wrong vector size!\n";
       return rewriter.notifyMatchFailure(
           op, "Buffer load to local does not support the required load vector "
               "bitwidth" +
@@ -614,8 +610,6 @@ struct BufferLoadToLocalOpConversion
       auto src2Ptr = b.ptrtoint(i32_ty, flatShmemAddrs[i]);
       int elementBytes = vecBytes / vecTy.getNumElements();
       // int elementBytes = vecBytes;
-      llvm::outs() << "ELement bytes: " << elementBytes << "\n";
-      llvm::outs() << "Vec bytes: " << vecBytes << "\n";
       Value diff = b.sdiv(b.sub(src1Ptr, src2Ptr), b.i32_val(vecBytes));
 
       Value newOffset = b.add(offsetIn, diff);

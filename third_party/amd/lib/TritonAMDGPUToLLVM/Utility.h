@@ -92,6 +92,12 @@ bool canCoalesceWriteIntoSharedMemory(RewriterBase &rewriter,
                                       triton::gpu::MemDescType dstTy,
                                       unsigned vectorSize);
 
+// Returns true if the swizzling pattern does only swizzle the shared memory
+// offsets of a warp and does not exchange destination elements across warps
+bool doesSwizzleInsideWarp(RewriterBase &rewriter,
+                           const LinearLayout &srcToShared, unsigned vectorSize,
+                           unsigned warpSize);
+
 // Return true if op is used by DotScaledOp or UpcastMXFPOp ops.
 bool isUsedByDotScaledOp(Operation *op);
 
