@@ -28,6 +28,19 @@ using ::mlir::triton::AMD::ISAFamily;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 namespace {
 
+auto getAsyncCopyScopeDomain(MLIRContext *ctx) {
+  auto scopeDomainId = StringAttr::get(ctx, "AsyncCopy");
+  return LLVM::AliasScopeDomainAttr::get(ctx, scopeDomainId,
+                                         StringAttr::get(ctx, "AsyncCopies"));
+}
+
+auto getAsyncCopyScope(MLIRContext *ctx) {
+  auto scopeDomain = getAsyncCopyScopeDomain(ctx);
+  auto scopeId = StringAttr::get(ctx, "FirstSet");
+  return LLVM::AliasScopeAttr::get(ctx, scopeId, scopeDomain,
+                                   StringAttr::get(ctx, "First set"));
+}
+
 std::optional<LLVM::AtomicBinOp> matchAtomicOp(RMWOp atomicOp) {
   switch (atomicOp) {
   case RMWOp::AND:
@@ -196,6 +209,7 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
   LogicalResult
   matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    llvm::outs() << "Lower loads!!!!!!!!!!!!!!!\n";
     auto loc = op->getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
@@ -638,8 +652,11 @@ struct BufferLoadToLocalOpConversion
         linearPred = b.trunc(rewriter.getIntegerType(1), bitMask);
       }
 
-      bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc, laneOffset,
-                                  flatShmemAddrs[i], linearPred, op.getCache());
+      auto loadOp = bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc,
+                                                laneOffset, flatShmemAddrs[i],
+                                                linearPred, op.getCache());
+      loadOp.setAliasScopes(
+          mlir::ArrayAttr::get(getContext(), getAsyncCopyScope(getContext())));
 
       if (!otherElems.empty()) {
         Value storeVal = packElementRangeIntoVector(
@@ -1571,6 +1588,7 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
     // interested in those.
 
     int vmCnt = op.getNum();
+    vmCnt = 2;
     if (vmCnt >= 64) {
       return emitError(loc, "AsyncWait does not support values >= 64");
     }

@@ -31,6 +31,32 @@ using ::mlir::triton::gpu::getOrder;
 using ::mlir::triton::gpu::getShapePerCTA;
 using ::mlir::triton::gpu::SwizzledSharedEncodingAttr;
 
+inline auto getAsyncCopyScopeDomain(MLIRContext *ctx) {
+  auto scopeDomainId = StringAttr::get(ctx, "AsyncCopy");
+  return LLVM::AliasScopeDomainAttr::get(ctx, scopeDomainId,
+                                         StringAttr::get(ctx, "AsyncCopies"));
+}
+
+inline auto getAsyncCopyScope(MLIRContext *ctx) {
+  auto scopeDomain = getAsyncCopyScopeDomain(ctx);
+  auto scopeId = StringAttr::get(ctx, "FirstSet");
+  return LLVM::AliasScopeAttr::get(ctx, scopeId, scopeDomain,
+                                   StringAttr::get(ctx, "First set"));
+}
+
+inline auto getLoadScopeDomain(MLIRContext *ctx) {
+  auto scopeDomainId = StringAttr::get(ctx, "LocalLoad");
+  return LLVM::AliasScopeDomainAttr::get(ctx, scopeDomainId,
+                                         StringAttr::get(ctx, "LocalLoad"));
+}
+
+inline auto getLoadCopyScope(MLIRContext *ctx) {
+  auto scopeDomain = getLoadScopeDomain(ctx);
+  auto scopeId = StringAttr::get(ctx, "FirstSet");
+  return LLVM::AliasScopeAttr::get(ctx, scopeId, scopeDomain,
+                                   StringAttr::get(ctx, "First set"));
+}
+
 namespace SharedToDotOperandMFMA {
 
 /// This function maps particular load of mfma dot operand to element
@@ -374,7 +400,12 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
                                k * loadsPerThread + loadId];
           loadOffset = tb.add(loadOffset, batchOffset);
           Value loadAddress = tb.gep(smemPtrTy, elemTy, smemBase, loadOffset);
-          Value loadedValue = tb.load(loadVecTy, loadAddress);
+          auto loadOp = tb.load(loadVecTy, loadAddress);
+          loadOp.setNoaliasScopesAttr(mlir::ArrayAttr::get(
+              loadOp->getContext(), getAsyncCopyScope(loadOp->getContext())));
+          loadOp.setAliasScopesAttr(mlir::ArrayAttr::get(
+              loadOp->getContext(), getLoadCopyScope(loadOp->getContext())));
+          Value loadedValue = loadOp;
           for (int elemId = 0; elemId < elemsPerLoad; ++elemId) {
             Value elemVal =
                 tb.extract_element(elemTy, loadedValue, tb.i32_val(elemId));

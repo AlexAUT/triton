@@ -10,6 +10,32 @@ using ::mlir::triton::gpu::AMDWmmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::MemDescType;
 
+inline auto getAsyncCopyScopeDomain(MLIRContext *ctx) {
+  auto scopeDomainId = StringAttr::get(ctx, "AsyncCopy");
+  return LLVM::AliasScopeDomainAttr::get(ctx, scopeDomainId,
+                                         StringAttr::get(ctx, "AsyncCopies"));
+}
+
+inline auto getAsyncCopyScope(MLIRContext *ctx) {
+  auto scopeDomain = getAsyncCopyScopeDomain(ctx);
+  auto scopeId = StringAttr::get(ctx, "FirstSet");
+  return LLVM::AliasScopeAttr::get(ctx, scopeId, scopeDomain,
+                                   StringAttr::get(ctx, "First set"));
+}
+
+inline auto getLoadScopeDomain(MLIRContext *ctx) {
+  auto scopeDomainId = StringAttr::get(ctx, "LocalLoad");
+  return LLVM::AliasScopeDomainAttr::get(ctx, scopeDomainId,
+                                         StringAttr::get(ctx, "LocalLoad"));
+}
+
+inline auto getLoadCopyScope(MLIRContext *ctx) {
+  auto scopeDomain = getLoadScopeDomain(ctx);
+  auto scopeId = StringAttr::get(ctx, "FirstSet");
+  return LLVM::AliasScopeAttr::get(ctx, scopeId, scopeDomain,
+                                   StringAttr::get(ctx, "First set"));
+}
+
 namespace SharedToDotOperandMFMA {
 Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
                     Location loc, Value tensor,
@@ -119,7 +145,7 @@ public:
     Attribute srcLayout = srcTy.getEncoding();
     Attribute dstLayout = dstTy.getEncoding();
 
-    if (canUseTransLoad(op, srcTy, dstTy)) {
+    if (false && canUseTransLoad(op, srcTy, dstTy)) {
       assert(checkPerformanceProperties(srcTy, dstTy));
       return lowerSharedToDotOperandTransLL(op, adaptor, getTypeConverter(),
                                             rewriter);
@@ -258,6 +284,7 @@ private:
     auto ldsTransLayout = chooseDsReadB64TrLayout(dotEnc, shape, bitwidth);
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                          llvmElemTy, rewriter);
+    bool hasAsyncToken = op.getToken() != nullptr;
     SmallVector<Value> outVals;
     SmallVector<Value> elemsI32;
     mlir::Type retTy = dstTy;
@@ -268,6 +295,12 @@ private:
           if (bitwidth == 16) {
             auto dsReadOp =
                 rewriter.create<ROCDL::ds_read_tr16_b64>(loc, vecTy, vecAddr);
+            if (hasAsyncToken) {
+              dsReadOp->setAttr(
+                  str_attr("alias_scopes"),
+                  mlir::ArrayAttr::get(getContext(),
+                                       getAsyncCopyScope(getContext())));
+            }
             Value vecVal = dsReadOp.getResult();
             for (int v = 0; v < vecTy.getNumElements(); v++) {
               outVals.push_back(
@@ -281,6 +314,12 @@ private:
 
             auto dsReadOp =
                 rewriter.create<ROCDL::ds_read_tr8_b64>(loc, i32VecTy, vecAddr);
+            if (hasAsyncToken) {
+              dsReadOp->setAttr(
+                  str_attr("alias_scopes"),
+                  mlir::ArrayAttr::get(getContext(),
+                                       getAsyncCopyScope(getContext())));
+            }
             Value vecVal = dsReadOp.getResult();
             for (auto i = 0; i < numElemsI32; ++i) {
               elemsI32.push_back(

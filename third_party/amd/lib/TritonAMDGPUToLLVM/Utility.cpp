@@ -614,13 +614,13 @@ bool canCoalesceWriteIntoSharedMemory(RewriterBase &rewriter,
       triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
   LinearLayout srcToSharedLayout = srcLayout.invertAndCompose(sharedLayout);
 
-  llvm::outs() << "Sh: " << dstTy << "\n";
-  llvm::outs() << "LL: " << srcToSharedLayout << "\n";
+  // llvm::outs() << "Sh: " << dstTy << "\n";
+  // llvm::outs() << "LL: " << srcToSharedLayout << "\n";
 
   auto contig = srcToSharedLayout.getNumConsecutiveInOut();
   assert(contig == vectorSize);
 
-  llvm::outs() << "Contig: " << contig << "\n";
+  // llvm::outs() << "Contig: " << contig << "\n";
 
   StringAttr kLane = rewriter.getStringAttr("lane");
   for (int inLane : llvm::seq(srcToSharedLayout.getInDimSizeLog2(kLane))) {
