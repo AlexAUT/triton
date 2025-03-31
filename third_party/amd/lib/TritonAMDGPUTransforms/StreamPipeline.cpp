@@ -348,11 +348,10 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
   ttg::AsyncWaitOp wait =
       builder.create<ttg::AsyncWaitOp>(loc, commit->getResult(0), 0);
 
-  // If we have 2 buffers we need to place the prefetches (AsyncCopy)
-  // after the local_reads and therefore also the AsyncWaits to avoid another
-  // barrier. This is done by scheduling it as a local_store.
-  if (numBuffers == 2)
-    scheduleOp(newLoadOp, SCHED_LOCAL_STORE);
+  // We need to place the prefetches (AsyncCopy) after the local_reads and
+  // therefore also the AsyncWaits to avoid another barrier. This is done by
+  // scheduling it as a local_store.
+  scheduleOp(newLoadOp, SCHED_LOCAL_STORE);
 
   // Create local load which consumes the async token from the AsyncWait
   auto sharedLoad =
