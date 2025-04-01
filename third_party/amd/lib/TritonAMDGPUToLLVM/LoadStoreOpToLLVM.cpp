@@ -552,8 +552,12 @@ struct BufferLoadToLocalOpConversion
         }
       }
 
-      bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc, offsetIn,
-                                  coalescedShmemAddr[i], pred, op.getCache());
+      auto bufferLoadToLds = bufferEmitter.emitLoadToLds(
+          vecTy, vecBytesVal, rsrcDesc, offsetIn, coalescedShmemAddr[i], pred,
+          op.getCache());
+      LLVM::AMD::applyLoadToLdsAliasScopeInformation(getContext(),
+                                                     bufferLoadToLds);
+
       if (!otherElems.empty()) {
         Value storeVal = packElementRangeIntoVector(
             rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
@@ -762,12 +766,14 @@ struct AsyncCopyGlobalToLocalOpConversion
       }
 
       if (maskElems.empty()) {
-        rewriter.create<ROCDL::GlobalLoadLDSOp>(
+        auto globalLoadLds = rewriter.create<ROCDL::GlobalLoadLDSOp>(
             loc,
             /*globalPtr=*/srcPtr, /*ldsPtr=*/coalescedShmemAddr[i],
             /*size=*/vecBytesVal, /*offset=*/b.i32_val(0),
             /*aux=*/cacheModifiers, /*alias_scopes=*/nullptr,
             /*noalias_scopes=*/nullptr, /*tbaa=*/nullptr);
+        LLVM::AMD::applyLoadToLdsAliasScopeInformation(getContext(),
+                                                       globalLoadLds);
         continue;
       }
 
@@ -778,9 +784,11 @@ struct AsyncCopyGlobalToLocalOpConversion
       rewriter.setInsertionPointToEnd(currentBlock);
       rewriter.create<LLVM::CondBrOp>(loc, pred, loadBlock, afterLoad);
       rewriter.setInsertionPointToStart(loadBlock);
-      rewriter.create<ROCDL::GlobalLoadLDSOp>(
+      auto globalLoadLds = rewriter.create<ROCDL::GlobalLoadLDSOp>(
           loc, srcPtr, coalescedShmemAddr[i], vecBytesVal,
           /*offset=*/b.i32_val(0), cacheModifiers, nullptr, nullptr, nullptr);
+      LLVM::AMD::applyLoadToLdsAliasScopeInformation(getContext(),
+                                                     globalLoadLds);
 
       rewriter.create<LLVM::BrOp>(loc, afterLoad);
       rewriter.setInsertionPointToStart(afterLoad);

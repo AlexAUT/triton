@@ -73,6 +73,31 @@ Type castToVectorType(Type ty) {
   return LLVM::getFixedVectorType(ty, 1);
 }
 
+LLVM::AliasScopeDomainAttr getAsyncCopyScopeDomain(MLIRContext *ctx) {
+  auto scopeDomainId = StringAttr::get(ctx, "AsyncCopy");
+  return LLVM::AliasScopeDomainAttr::get(ctx, scopeDomainId,
+                                         StringAttr::get(ctx, "AsyncCopies"));
+}
+
+LLVM::AliasScopeAttr getAsyncCopyScope(MLIRContext *ctx) {
+  auto scopeDomain = getAsyncCopyScopeDomain(ctx);
+  auto scopeId = StringAttr::get(ctx, "FirstSet");
+  return LLVM::AliasScopeAttr::get(ctx, scopeId, scopeDomain,
+                                   StringAttr::get(ctx, "First set"));
+}
+
+LLVM::AliasScopeDomainAttr getLoadScopeDomain(MLIRContext *ctx) {
+  auto scopeDomainId = StringAttr::get(ctx, "LocalLoad");
+  return LLVM::AliasScopeDomainAttr::get(ctx, scopeDomainId,
+                                         StringAttr::get(ctx, "LocalLoad"));
+}
+
+LLVM::AliasScopeAttr getLoadCopyScope(MLIRContext *ctx) {
+  auto scopeDomain = getLoadScopeDomain(ctx);
+  auto scopeId = StringAttr::get(ctx, "FirstSet");
+  return LLVM::AliasScopeAttr::get(ctx, scopeId, scopeDomain,
+                                   StringAttr::get(ctx, "First set"));
+}
 } // namespace
 
 namespace mlir::LLVM::AMD {
@@ -658,6 +683,17 @@ bool doesSwizzleInsideWarp(RewriterBase &rewriter,
     }
   }
   return true;
+}
+
+void applyLoadToLdsAliasScopeInformation(
+    MLIRContext *ctx, mlir::LLVM::AliasAnalysisOpInterface loadOp) {
+  loadOp.setAliasScopes(mlir::ArrayAttr::get(ctx, getAsyncCopyScope(ctx)));
+}
+
+void applyReadAliasScopeInformation(
+    MLIRContext *ctx, mlir::LLVM::AliasAnalysisOpInterface readOp) {
+  readOp.setAliasScopes(mlir::ArrayAttr::get(ctx, getLoadCopyScope(ctx)));
+  readOp.setNoAliasScopes(mlir::ArrayAttr::get(ctx, getAsyncCopyScope(ctx)));
 }
 
 bool isUsedByDotScaledOp(Operation *op) {

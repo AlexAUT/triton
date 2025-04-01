@@ -97,6 +97,14 @@ bool doesSwizzleInsideWarp(RewriterBase &rewriter,
                            const LinearLayout &srcToSharedLayout,
                            unsigned threadsPerWarp);
 
+// Applies alias information to direct to lds loads and local_reads to give the
+// backend insight on the non dependency between direct to lds loads and local
+// reads
+void applyLoadToLdsAliasScopeInformation(
+    MLIRContext *ctx, mlir::LLVM::AliasAnalysisOpInterface loadOp);
+void applyReadAliasScopeInformation(
+    MLIRContext *ctx, mlir::LLVM::AliasAnalysisOpInterface readOp);
+
 // Return true if op is used by DotScaledOp or UpcastMXFPOp ops.
 bool isUsedByDotScaledOp(Operation *op);
 
