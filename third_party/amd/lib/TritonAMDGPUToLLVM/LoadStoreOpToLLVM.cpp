@@ -1527,10 +1527,8 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
     // 15:14. We have to set all other bits in v to 1 to signal we are not
     // interested in those.
 
-    int vmCnt = op.getNum();
-    if (vmCnt >= 64) {
-      return emitError(loc, "AsyncWait does not support values >= 64");
-    }
+    // Clamp vmcnt to hardware limit, a lower number will not affect correctness
+    unsigned vmCnt = std::min(63u, op.getNum());
 
     // Extract low and high bits and combine while setting all other bits to 1
     unsigned lowBits = vmCnt & 0xF;
