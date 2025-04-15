@@ -101,16 +101,18 @@ namespace {
 //
 class StreamPipeliner {
   // Define categories of scheduling details per Operation types.
-  // The StreamPipeliner schedules 4 types of operations:
+  // The StreamPipeliner schedules 5 types of operations:
   // 1. GLOBAL_LOAD: tt.load
   // 2. LOCAL_STORE: ttg.local_store (created by the StreamPipeliner)
   // 3. LOCAL_LOAD:  ttg.local_load (created by the StreamPipeliner)
   // 4. COMPUTE:     ops that use the loaded data
+  // 5. ASYNC_WAIT:  ttg.async_wait (created by the StreamPipeliner)
   enum SchedType {
     SCHED_GLOBAL_LOAD,
     SCHED_LOCAL_STORE,
     SCHED_LOCAL_LOAD,
     SCHED_COMPUTE,
+    SCHED_ASYNC_WAIT,
     SCHED_SIZE
   };
 
@@ -124,6 +126,8 @@ public:
     stages[SCHED_GLOBAL_LOAD] = 0;
     stages[SCHED_LOCAL_STORE] = _globalPrefetch;
     stages[SCHED_LOCAL_LOAD] = lastStage - _localPrefetch;
+    // AsyncWait should be in same stage as the LocalLoad
+    stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_LOAD];
     stages[SCHED_COMPUTE] = lastStage;
 
     options.supportDynamicLoops = true;
@@ -282,6 +286,9 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   clusters[SCHED_LOCAL_STORE] = clusterVec[localStoreCluster];
   clusters[SCHED_LOCAL_LOAD] = clusterVec[localLoadCluster];
   clusters[SCHED_COMPUTE] = clusterVec[computeCluster];
+  // Always have ASYNC_WAIT as the first cluster because we want it at the top
+  // of the schedule block
+  clusters[SCHED_ASYNC_WAIT] = schedule.clusters.newAtFront();
 
   LDBG("Cluster schedule:" << "  GLOBAL_LOAD cluster = " << globalLoadCluster
                            << ", LOCAL_STORE cluster = " << localStoreCluster
@@ -333,26 +340,23 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
   for (auto alloc : allocsToErase)
     alloc.erase();
 
-  auto [stage, cluster] = schedule[loadOp];
+  auto [loadStage, loadCluster] = schedule[loadOp];
 
   auto newLoadOp = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
       loadOp.getLoc(), src, viewLoad, loadOp.getMask(), loadOp.getOther(),
       loadOp.getCache(), loadOp.getEvict(), loadOp.getIsVolatile());
   schedule.erase(loadOp);
-  schedule.insert(newLoadOp, stage, cluster);
+  schedule.insert(newLoadOp, loadStage, loadCluster);
 
   // Insert synchronization primitives to create barriers during lowering
   auto commit =
       builder.create<ttg::AsyncCommitGroupOp>(loc, newLoadOp->getResult(0));
+  // Place AsyncCommitGroup right after AsyncCopy
+  schedule.insert(commit, loadStage, loadCluster);
+
   ttg::AsyncWaitOp wait =
       builder.create<ttg::AsyncWaitOp>(loc, commit->getResult(0), 0);
-  // We need to place the prefetches (AsyncCopy) after the AsyncWaits which
-  // create a barrier to ensure all warps are finished reading the shared buffer
-  // we will write into. This is done by scheduling it as a local_store.
-  scheduleOp(newLoadOp, SCHED_LOCAL_STORE);
-  // Place ttg.async_commit_group op next to async load so the later
-  // UpdateAsyncWaitCount pass can deduce better waitcnts
-  scheduleOp(commit, SCHED_LOCAL_STORE);
+  scheduleOp(wait, SCHED_ASYNC_WAIT);
 
   // Create local load which consumes the async token from the AsyncWait
   auto sharedLoad =
