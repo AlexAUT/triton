@@ -172,6 +172,12 @@ void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
     return;
   }
 
+  // AsyncCopyGlobalToLocal are syncronized via AsyncWait so we do not want to
+  // track their dependencies
+  if (isa<triton::gpu::AsyncCopyGlobalToLocalOp>(op)) {
+    return;
+  }
+
   if (isa<triton::gpu::AsyncWaitOp, triton::nvidia_gpu::TMAStoreWaitOp>(op) &&
       !isa<gpu::BarrierOp>(op->getNextNode())) {
     // If the current op is an async wait and the next op is not a barrier we
