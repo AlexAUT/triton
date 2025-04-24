@@ -390,13 +390,12 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
   schedule.insert(newLoadOp, loadStage, loadCluster);
   // Place AsyncCommitGroup right after AsyncCopy
   schedule.insert(commit, loadStage, loadCluster);
-  // Place the shared layout depending on which dot it belong to
+  // We have a separate cluster for the async_wait and LocalLoad which is right
+  // before the AsyncCopy cluster
   auto localLoadStage = loadStage == 0 ? 1 : 3;
-  auto localLoadCluster = loadStage == 0 ? 3 : 1;
-  schedule.insert(sharedLoad, localLoadStage, mainClusters[localLoadCluster]);
-  // Place the async wait into the wait cluster
-  auto waitCluster = loadStage == 0 ? 1 : 0;
-  schedule.insert(wait, localLoadStage, waitClusters[waitCluster]);
+  auto localLoadCluster = loadStage == 0 ? 1 : 0;
+  schedule.insert(sharedLoad, localLoadStage, waitClusters[localLoadCluster]);
+  schedule.insert(wait, localLoadStage, waitClusters[localLoadCluster]);
 
   // Make sure that a possible cvt is in the same stage or otherwise it will not
   // get folded
@@ -404,7 +403,7 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
     if (auto cvt =
             dyn_cast<ttg::ConvertLayoutOp>(*sharedLoad->getUsers().begin())) {
       LDBG("Change cvt layout stage and cluster");
-      schedule.insert(cvt, localLoadStage, mainClusters[localLoadCluster]);
+      schedule.insert(cvt, localLoadStage, waitClusters[localLoadCluster]);
     }
   }
 
