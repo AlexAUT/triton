@@ -164,6 +164,31 @@ tt.func @async_copy_global_to_local(%A : !tt.ptr<f16>, %i1 : i1) {
   %4 = ttg.local_load %subview : !ttg.memdesc<16x16xf16, #A_SHARED, #ttg.shared_memory, mutable> -> tensor<16x16xf16, #AL>
   tt.return
 }
+
+// CHECK-LABEL: pipelined_async_copy_local_to_global
+tt.func @pipelined_async_copy_local_to_global(%A : !tt.ptr<f16>) {
+  %index_0 = arith.constant 0 : i32
+  %index_1 = arith.constant 1 : i32
+  %a_ptr = tt.splat %A : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>, #AL>
+  %alloc = ttg.local_alloc : () -> !ttg.memdesc<2x16x16xf16, #A_SHARED, #ttg.shared_memory, mutable>
+  %tile_a = ttg.memdesc_subview %alloc[%index_0, %index_0, %index_0] : !ttg.memdesc<2x16x16xf16, #A_SHARED, #ttg.shared_memory, mutable> -> !ttg.memdesc<16x16xf16, #A_SHARED, #ttg.shared_memory, mutable>
+  %tile_b = ttg.memdesc_subview %alloc[%index_1, %index_0, %index_0] : !ttg.memdesc<2x16x16xf16, #A_SHARED, #ttg.shared_memory, mutable> -> !ttg.memdesc<16x16xf16, #A_SHARED, #ttg.shared_memory, mutable>
+  // Load TileA
+  %1 = ttg.async_copy_global_to_local %a_ptr, %tile_a : tensor<16x16x!tt.ptr<f16>, #AL> -> !ttg.memdesc<16x16xf16, #A_SHARED, #ttg.shared_memory, mutable>
+  // Wait for TileA
+  %2 = ttg.async_wait %1 {num = 4 : i32}
+  // Read TileA
+  %4 = ttg.local_load %tile_a token %2 : !ttg.memdesc<16x16xf16, #A_SHARED, #ttg.shared_memory, mutable> -> tensor<16x16xf16, #AL>
+  // Load into TileB
+  %3 = ttg.async_copy_global_to_local %a_ptr, %tile_b : tensor<16x16x!tt.ptr<f16>, #AL> -> !ttg.memdesc<16x16xf16, #A_SHARED, #ttg.shared_memory, mutable>
+  // There should be a single barrier after async_wait
+  // CHECK-NOT: gpu.barrier
+  // CHECK: ttg.async_wait
+  // CHECK-NEXT: gpu.barrier
+  // CHECK-NOT: gpu.barrier
+  tt.return
+}
+
 // If branch inserted a barrier for %cst0, but else didn't, then the barrier should be inserted in the parent region
 // CHECK-LABEL: multi_blocks
 tt.func @multi_blocks(%i1 : i1) {

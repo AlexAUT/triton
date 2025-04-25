@@ -182,6 +182,16 @@ void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
     return;
   }
 
+  if (isa<triton::gpu::LocalLoadOp>(op)) {
+    // LocalLoads synced via AsyncWait do not need a barrier because the
+    // AsyncWait will create a barrier already
+    auto localLoad = cast<triton::gpu::LocalLoadOp>(op);
+    auto token = localLoad.getToken();
+    if (token && token.getDefiningOp<triton::gpu::AsyncWaitOp>()) {
+      return;
+    }
+  }
+
   BlockInfo curBlockInfo;
   auto scratchBufferId = Allocation::InvalidBufferId;
   if (isa<triton::CallOp>(op)) {
