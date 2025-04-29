@@ -101,16 +101,19 @@ namespace {
 //
 class StreamPipeliner {
   // Define categories of scheduling details per Operation types.
-  // The StreamPipeliner schedules 4 types of operations:
-  // 1. GLOBAL_LOAD: tt.load
-  // 2. LOCAL_STORE: ttg.local_store (created by the StreamPipeliner)
-  // 3. LOCAL_LOAD:  ttg.local_load (created by the StreamPipeliner)
+  // The StreamPipeliner schedules 5 types of operations:
+  // 1. GLOBAL_LOAD: tt.load / ttg.async_copy_global_to_local
+  // 2. LOCAL_STORE: ttg.local_store
+  // 3. LOCAL_LOAD:  ttg.local_load
   // 4. COMPUTE:     ops that use the loaded data
+  // 5. ASYNC_WAIT:  ttg.async_wait
+  // Note that ttg ops mentioned in the above list are created in this pass.
   enum SchedType {
     SCHED_GLOBAL_LOAD,
     SCHED_LOCAL_STORE,
     SCHED_LOCAL_LOAD,
     SCHED_COMPUTE,
+    SCHED_ASYNC_WAIT,
     SCHED_SIZE
   };
 
@@ -125,6 +128,7 @@ public:
     stages[SCHED_LOCAL_STORE] = _globalPrefetch;
     stages[SCHED_LOCAL_LOAD] = lastStage - _localPrefetch;
     stages[SCHED_COMPUTE] = lastStage;
+    stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_LOAD];
 
     options.supportDynamicLoops = true;
     options.peelEpilogue = true;
@@ -218,7 +222,6 @@ private:
 //   WARNING: Changing the order of schedule.clusters.newAtBack() calls
 //            can cause invalid schedules to be produced.
 LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
-
   bool pairedGlobalLoadLocalStore = stages[SCHED_LOCAL_STORE] == 0;
   stages[SCHED_LOCAL_STORE] += maxIndirectionLevel;
 
@@ -227,6 +230,7 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
                         << ", LOCAL_STORE stage = " << stages[SCHED_LOCAL_STORE]
                         << ", LOCAL_LOAD stage = " << stages[SCHED_LOCAL_LOAD]
                         << ", COMPUTE stage = " << stages[SCHED_COMPUTE]
+                        << ", ASYNC_WAIT stage = " << stages[SCHED_ASYNC_WAIT]
                         << "; total = " << numStages);
 
   if (stages[SCHED_LOCAL_STORE] >= numStages ||
@@ -248,15 +252,19 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
 
   LDBG("deduced max shared memory buffer number = " << numBuffers);
 
+  // We place async wait as the first cluster because we want to have it being
+  // the first in the main loop after pipelining.
+  int asyncWaitCluster = 0;
+
   // If tt.load and ttg.local_store are in the same stage
   //   spread them apart to allow overlap with compute
   // else
   //   Initiate ttg.local_store before tt.load
-  int globalLoadCluster = 0;
-  int localStoreCluster = 2;
+  int globalLoadCluster = 1;
+  int localStoreCluster = 3;
   if (!pairedGlobalLoadLocalStore) {
-    globalLoadCluster = 2;
-    localStoreCluster = 1;
+    globalLoadCluster = 3;
+    localStoreCluster = 2;
   }
 
   // If ttg.local_load and ttg.local_store are in the same stage
@@ -267,7 +275,7 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   //   schedule ttg.local_load in the middle
   int localLoadCluster = globalLoadCluster;
   if (stages[SCHED_LOCAL_LOAD] == stages[SCHED_LOCAL_STORE]) {
-    localLoadCluster = std::max(2, localStoreCluster + 1);
+    localLoadCluster = std::max(3, localStoreCluster + 1);
   } else if (numBuffers == 1 && localLoadCluster >= localStoreCluster) {
     // For 1 buffer, ttg.local_load must occur before ttg.local_store
     localLoadCluster = localStoreCluster - 1;
@@ -275,7 +283,7 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
 
   // Schedule compute with ttg.local_load if paired
   // otherwise, schedule in the middle
-  int computeCluster = 1;
+  int computeCluster = 2;
   if (stages[SCHED_LOCAL_LOAD] == stages[SCHED_COMPUTE]) {
     computeCluster = localLoadCluster;
   }
@@ -306,17 +314,24 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
   clusters[SCHED_GLOBAL_LOAD] = softmaxClusters[1];
   clusters[SCHED_LOCAL_STORE] = asyncCopyClusters[0];
   clusters[SCHED_LOCAL_LOAD] = asyncCopyClusters[0];
+  clusters[SCHED_ASYNC_WAIT] = asyncCopyClusters[0];
   clusters[SCHED_COMPUTE] = softmaxClusters[0];
+  // Make assignments
+  // std::array<tt::CoarseSchedule::Cluster, SCHED_SIZE> clusterVec;
+  // std::generate(clusterVec.begin(), clusterVec.end(),
+  //               [&]() { return schedule.clusters.newAtBack(); });
 
-  clusters[SCHED_GLOBAL_LOAD] = clusterVec[globalLoadCluster];
-  clusters[SCHED_LOCAL_STORE] = clusterVec[localStoreCluster];
-  clusters[SCHED_LOCAL_LOAD] = clusterVec[localLoadCluster];
-  clusters[SCHED_COMPUTE] = clusterVec[computeCluster];
+  // clusters[SCHED_GLOBAL_LOAD] = clusterVec[globalLoadCluster];
+  // clusters[SCHED_LOCAL_STORE] = clusterVec[localStoreCluster];
+  // clusters[SCHED_LOCAL_LOAD] = clusterVec[localLoadCluster];
+  // clusters[SCHED_COMPUTE] = clusterVec[computeCluster];
+  // clusters[SCHED_ASYNC_WAIT] = clusterVec[asyncWaitCluster];
 
   LDBG("Cluster schedule:" << "  GLOBAL_LOAD cluster = " << globalLoadCluster
                            << ", LOCAL_STORE cluster = " << localStoreCluster
                            << ", LOCAL_LOAD cluster = " << localLoadCluster
                            << ", COMPUTE cluster = " << computeCluster
+                           << ", ASYNC_WAIT cluster = " << asyncWaitCluster
                            << "; total = " << SCHED_SIZE);
 
   return success();
@@ -363,46 +378,48 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
   for (auto alloc : allocsToErase)
     alloc.erase();
 
-  auto [stage, cluster] = schedule[loadOp];
-
-  auto newLoadOp = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
+  auto copyOp = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
       loadOp.getLoc(), src, viewLoad, loadOp.getMask(), loadOp.getOther(),
       loadOp.getCache(), loadOp.getEvict(), loadOp.getIsVolatile());
-  schedule.erase(loadOp);
-  schedule.insert(newLoadOp, stage, cluster);
 
   // Insert synchronization primitives to create barriers during lowering
-  auto commit =
-      builder.create<ttg::AsyncCommitGroupOp>(loc, newLoadOp->getResult(0));
-  ttg::AsyncWaitOp wait =
-      builder.create<ttg::AsyncWaitOp>(loc, commit->getResult(0), 0);
-  // We need to place the prefetches (AsyncCopy) after the AsyncWaits which
-  // create a barrier to ensure all warps are finished reading the shared buffer
-  // we will write into. This is done by scheduling it as a local_store.
-  scheduleOp(newLoadOp, SCHED_LOCAL_STORE);
-  // Place ttg.async_commit_group op next to async load so the later
-  // UpdateAsyncWaitCount pass can deduce better waitcnts
-  scheduleOp(commit, SCHED_LOCAL_STORE);
+  auto commitOp =
+      builder.create<ttg::AsyncCommitGroupOp>(loc, copyOp->getResult(0));
+
+  ttg::AsyncWaitOp waitOp =
+      builder.create<ttg::AsyncWaitOp>(loc, commitOp->getResult(0), 0);
 
   // Create local load which consumes the async token from the AsyncWait
   auto sharedLoad =
-      builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewLoad, wait);
+      builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewLoad, waitOp);
+
+  auto [loadStage, loadCluster] = schedule[loadOp];
+  // Schedule new ops
+  schedule.insert(copyOp, loadStage, loadCluster);
+  // Place ttg.async_commit_group op following AsyncCopyGlobalToLocal so the
+  // later UpdateAsyncWaitCount pass can deduce better waitcnts
+  schedule.insert(commitOp, loadStage, loadCluster);
+  // If the LocalLoads are scheduled to a later stage than AsyncCopy we need to
+  // place the AsyncCopy prefetches after the AsyncWaits which create a barrier
+  // to ensure all warps are finished reading the shared buffer we will write
+  // into. This is done by scheduling AsyncWait as the first cluster.
+  // If AsyncCopy and LocalLoads are in the same stage we do not assign a
+  // schdule so they are placed before the LocalLoads
+  // Disable for FA
+  // if (loadStage != stages[SCHED_LOCAL_LOAD])
+  //   scheduleOp(waitOp, SCHED_ASYNC_WAIT);
+
+  // if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE])
+  //   scheduleOp(sharedLoad, SCHED_LOCAL_LOAD);
+
   loadOp->replaceAllUsesWith(ValueRange{sharedLoad});
 
-  // Schedule new ops
-
-  // Schedule AsyncCopy the same as the original load
-  auto [loadStage, loadCluster] = schedule[loadOp];
-  schedule.insert(newLoadOp, loadStage, loadCluster);
-  // Place AsyncCommitGroup right after AsyncCopy
-  schedule.insert(commit, loadStage, loadCluster);
-  // We have a separate cluster for the async_wait and LocalLoad which is right
-  // before the AsyncCopy cluster
+  // 4-stage pipeliner scheduleing
   auto localLoadStage = loadStage == 0 ? 1 : 3;
   auto localLoadCluster = loadStage == 0 ? 1 : 0;
   schedule.insert(sharedLoad, localLoadStage,
                   localReadClusters[localLoadCluster]);
-  schedule.insert(wait, localLoadStage, localReadClusters[localLoadCluster]);
+  schedule.insert(waitOp, localLoadStage, localReadClusters[localLoadCluster]);
 
   // Make sure that a possible cvt is in the same stage or otherwise it will not
   // get folded
