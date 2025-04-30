@@ -24,7 +24,7 @@ add_triton_library(TritonAMDGPUToLLVM
     SchedInstructions.cpp
     UpcastMXFPToLLVM.cpp
     MembarUtility.cpp
-    ScalarizePackedFOps.cpp
+    ScalarizeVectorFOps.cpp
 
     DEPENDS
     TritonAMDGPUConversionPassIncGen
