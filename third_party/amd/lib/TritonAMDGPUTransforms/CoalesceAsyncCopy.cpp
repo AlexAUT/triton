@@ -3,6 +3,10 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/Attributes.h"
+#include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
+#include "triton/Tools/LayoutUtils.h"
+#include "llvm/ADT/SmallVector.h"
 
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
@@ -89,8 +93,8 @@ struct CoalesceAsyncCopyWrites
     auto contigPerThread = ttg::getContigPerThread(srcTy);
     auto blockedContig = contigPerThread[blockedEnc.getOrder()[0]];
     if (blockedContig == loadContig) {
-      return rewriter.notifyMatchFailure(copyOp,
-                                         "already using the correct layout");
+      // return rewriter.notifyMatchFailure(copyOp,
+      //                                    "already using the correct layout");
     }
 
     // Get new blocked encoding with loadContig as sizePerThread in the fastest
@@ -113,13 +117,56 @@ struct CoalesceAsyncCopyWrites
       return rewriter.create<ttg::ConvertLayoutOp>(loc, newSrcTy, old);
     };
 
-    auto loc = copyOp->getLoc();
-    Value cvtSrc = convertLayout(loc, src, newBlockEnc);
+    // Apply swizzling to src layout
+    // if (sharedEnc.getMaxPhase() != 1) {
+    // auto llShared = ttg::toLinearLayout(dstTy.getShape(), sharedEnc);
+    // auto llSrc = ttg::toLinearLayout(srcTy.getShape(), blockedEnc);
+    // auto srcToShared = llSrc.invertAndCompose(llShared);
 
-    if (mask)
-      mask = convertLayout(loc, mask, newBlockEnc);
-    if (other)
-      other = convertLayout(loc, other, newBlockEnc);
+    auto *ctx = copyOp.getContext();
+    SmallVector<StringAttr> outNames = standardOutDimNames(ctx, 2);
+    // auto outNames = llvm::to_vector(regToSharedLayout.getOutDimNames());
+    auto order = blockedEnc.getOrder();
+    auto shape = srcTy.getShape();
+    SmallVector<std::pair<StringAttr, int>> newShape;
+    int outIndex{};
+    llvm::outs() << "Shared: " << sharedEnc << "\n";
+    llvm::outs() << "Order: " << order[0] << ", " << order[1] << "\n";
+    for (auto outDimIndex : blockedEnc.getOrder()) {
+      newShape.push_back({outNames[outDimIndex], shape[outDimIndex]});
+      outIndex++;
+      llvm::outs() << "New shape: " << newShape.back().first << ": "
+                   << newShape.back().second << "\n";
+    }
+    llvm::outs() << "Blocked: " << regLayout << "\n";
+    llvm::outs() << "Initial: " << regToSharedLayout << "\n";
+
+    auto flatten = regToSharedLayout.flattenOuts();
+    auto reshapedFlatten = flatten.reshapeOuts(newShape);
+    auto transposed = reshapedFlatten.transposeOuts(
+        llvm::to_vector(regLayout.getOutDimNames()));
+    llvm::outs() << "Flatten: " << flatten << "\n";
+    llvm::outs() << "Reshaped Flatten: " << reshapedFlatten << "\n";
+    llvm::outs() << "Transposed Reshaped Flatten: " << transposed << "\n";
+
+    auto newEnc =
+        ttg::LinearEncodingAttr::get(copyOp->getContext(), transposed);
+
+    // llvm::outs() << srcToShared << "\n" << combine << "\n";
+    // }
+
+    auto loc = copyOp->getLoc();
+    // Value cvtSrc = convertLayout(loc, src, newBlockEnc);
+    Value cvtSrc = convertLayout(loc, src, newEnc);
+
+    if (mask) {
+      // mask = convertLayout(loc, mask, newBlockEnc);
+      mask = convertLayout(loc, mask, newEnc);
+    }
+    if (other) {
+      // other = convertLayout(loc, other, newBlockEnc);
+      other = convertLayout(loc, other, newEnc);
+    }
 
     rewriter.modifyOpInPlace(copyOp, [&]() {
       copyOp.getSrcMutable().assign(cvtSrc);

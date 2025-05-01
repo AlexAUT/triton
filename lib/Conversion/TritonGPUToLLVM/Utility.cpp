@@ -220,6 +220,7 @@ emitIndices(Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
   MLIRContext *ctx = rewriter.getContext();
   auto shape = type.getShape();
 
+  llvm::outs() << "Emit Indices for layout: " << layout << "\n";
   LinearLayout ll = triton::gpu::toLinearLayout(shape, layout);
 
   // TODO(jlebar): We could add strong typing if we wanted; for now this is

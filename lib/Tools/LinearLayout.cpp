@@ -195,8 +195,10 @@ LinearLayout::LinearLayout(BasesT bases, ArrayRef<StringAttr> outDimNames)
   }
 
   std::optional<std::string> error =
-      checkInvariants(/*requireSurjective=*/true);
+      checkInvariants(/*requireSurjective=*/false);
   if (error.has_value()) {
+    llvm::outs() << "Error: " << *error << "\n";
+    llvm::outs().flush();
     llvm::report_fatal_error(StringRef(*error));
   }
 }

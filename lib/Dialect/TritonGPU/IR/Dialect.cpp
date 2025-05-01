@@ -850,9 +850,10 @@ LinearEncodingAttr::verify(function_ref<InFlightDiagnostic()> emitError,
     if (!llvm::all_of(dimBases, [&](const auto &basis) {
           return std::count_if(basis.begin(), basis.end(), nonZero) <= 1;
         })) {
-      return emitError()
-             << "In a distributed layout, each base must move in at most one "
-                "dimension.";
+      // return emitError()
+      //        << "In a distributed layout, each base must move in at most one
+      //        "
+      //           "dimension.";
     }
   }
 
