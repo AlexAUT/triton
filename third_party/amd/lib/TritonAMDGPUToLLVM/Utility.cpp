@@ -794,5 +794,4 @@ SmallVector<unsigned> getCTATileOrder(MLIRContext *ctx,
 
   return order.takeVector();
 }
-
 } // namespace mlir::LLVM::AMD
