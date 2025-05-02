@@ -1,6 +1,7 @@
 import os
 import pytest
 import tempfile
+from typing import Optional, Set
 
 
 def pytest_configure(config):
@@ -26,20 +27,50 @@ def fresh_triton_cache():
             os.environ.pop("TRITON_CACHE_DIR", None)
 
 
-@pytest.fixture
-def fresh_config(request, monkeypatch):
-    from triton import config
-    config_map = {
-        name: conf
-        for name, conf in config.__dict__.items()
-        if isinstance(conf, config.base_config) and conf != config.base_config
+def _fresh_knobs_impl(monkeypatch, skipped_attr: Optional[Set[str]] = None):
+    from triton import knobs
+
+    if skipped_attr is None:
+        skipped_attr = set()
+
+    knobs_map = {
+        name: knobset
+        for name, knobset in knobs.__dict__.items()
+        if isinstance(knobset, knobs.base_knobs) and knobset != knobs.base_knobs and name not in skipped_attr
     }
-    try:
-        for name, conf in config_map.items():
-            setattr(config, name, conf.copy().reset())
-            for knob in conf.knob_descriptors.values():
+
+    def fresh_function():
+        for name, knobset in knobs_map.items():
+            setattr(knobs, name, knobset.copy().reset())
+            for knob in knobset.knob_descriptors.values():
                 monkeypatch.delenv(knob.key, raising=False)
-        yield config
+        return knobs
+
+    def reset_function():
+        for name, knobset in knobs_map.items():
+            setattr(knobs, name, knobset)
+
+    return fresh_function, reset_function
+
+
+@pytest.fixture
+def fresh_knobs(monkeypatch):
+    fresh_function, reset_function = _fresh_knobs_impl(monkeypatch)
+    try:
+        yield fresh_function()
     finally:
-        for name, conf in config_map.items():
-            setattr(config, name, conf)
+        reset_function()
+
+
+@pytest.fixture
+def fresh_knobs_except_libraries(monkeypatch):
+    """
+    A variant of `fresh_knobs` that keeps library path
+    information from the environment as these may be
+    needed to successfully compile kernels.
+    """
+    fresh_function, reset_function = _fresh_knobs_impl(monkeypatch, skipped_attr={"build", "nvidia", "amd"})
+    try:
+        yield fresh_function()
+    finally:
+        reset_function()
