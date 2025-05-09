@@ -190,8 +190,8 @@ private:
     ttg::SwizzledSharedEncodingAttr sharedEncoding = nullptr;
     // The distance of this load's stage to its use' stage.
     int distToUse = 0;
+    int bitWidth = 0;
     bool usedByDot = false;
-    bool isAsync = false;
   };
 
   // Mapping for each pipelined load to scheduling details.
@@ -311,6 +311,14 @@ bool StreamPipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
   // MembarUtility.h:membarFilter
   if (numBuffers == 1)
     return false;
+
+  if (!loadToInfo.contains(loadOp))
+    return false;
+
+  auto loadInfo = loadToInfo[loadOp];
+  if (loadInfo.bitWidth < 32) {
+    return false;
+  }
 
   OpBuilder builder(loadOp);
   Location loc = loadOp.getLoc();
@@ -487,7 +495,8 @@ static ttg::AMDMfmaEncodingAttr getDotEncoding(Value inputValue,
 // the same dot operand encoding, return true and get the shared encoding that
 // needs to be used to be compatible with users' layouts.
 static std::optional<ttg::SwizzledSharedEncodingAttr>
-getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
+getSharedEncIfAllUsersAreDotEnc(Value loadedValue, int dummy,
+                                bool useAsyncCopy) {
   ttg::SwizzledSharedEncodingAttr attr;
   for (Operation *user : loadedValue.getUsers()) {
     LDBG(" getSharedEncIfAllUsersAreDotEnc current user: " << *user);
@@ -501,7 +510,8 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
       // First time we find a shared encoding in the chain, save it and try to
       // use it if it is compatible with the other users.
       tempAttr = cast<ttg::SwizzledSharedEncodingAttr>(memDesc.getEncoding());
-      if (!getSharedEncIfAllUsersAreDotEnc(userResult).has_value())
+      if (!getSharedEncIfAllUsersAreDotEnc(userResult, dummy, useAsyncCopy)
+               .has_value())
         return std::nullopt;
     } else {
       if (!isa<ttg::LocalLoadOp, ttg::ConvertLayoutOp>(user))
@@ -538,6 +548,8 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
         unsigned opIdx;
         if (auto dotEnc = getDotEncoding(userResult, &opIdx)) {
           unsigned vecSize = llEnc.getLinearLayout().getNumConsecutiveInOut();
+          if (useAsyncCopy)
+            vecSize = std::min(vecSize, 32 / bitWidth);
           LDBG("deduced opIdx: " << opIdx << "; deduced vecSize: " << vecSize);
           tempAttr = dotEnc.composeSharedLayoutForOperand(
               ctaLayout, opIdx, srcTy.getShape(), order, vecSize, bitWidth,
@@ -624,17 +636,19 @@ void StreamPipeliner::assignMemoryLayouts() {
 
     auto pointeeTy =
         cast<tt::PointerType>(tensorTy.getElementType()).getPointeeType();
-    unsigned width = vec * pointeeTy.getIntOrFloatBitWidth();
 
-    LDBG("assign memory layouts (width=" << width << ") for load " << loadOp);
     LoadInfo loadInfo;
+    loadInfo.bitWidth = vec * pointeeTy.getIntOrFloatBitWidth();
+    LDBG("assign memory layouts (width=" << loadInfo.bitWidth << ") for load "
+                                         << loadOp);
     if (isa<tt::DotOpInterface>(use)) {
       // Only use shared memory when feeding into a dot op.
       loadInfo.usedByDot = true;
       // If the max continugous bits we can read is < 32, buffer in registers.
-      if (width >= 32) {
+      if (loadInfo.bitWidth >= 32) {
         loadInfo.sharedEncoding =
-            getSharedEncIfAllUsersAreDotEnc(op->getResult(0)).value_or(nullptr);
+            getSharedEncIfAllUsersAreDotEnc(op->getResult(0), useAsyncCopy)
+                .value_or(nullptr);
       }
     } else if (auto useOp = dyn_cast<tt::LoadOp>(use)) {
       // The use of this loadOp is another loadOp. If the use is not in the
@@ -858,7 +872,7 @@ Value StreamPipeliner::createAlloc(Operation *loadOp,
 void StreamPipeliner::createStreamOps() {
   SmallVector<std::pair<Operation *, Value>> loadToAllocs;
   for (auto &[loadOp, info] : loadToInfo) {
-    if (!info.sharedEncoding || info.isAsync)
+    if (!info.sharedEncoding)
       continue;
 
     Value alloc = createAlloc(loadOp, info.sharedEncoding);
