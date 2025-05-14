@@ -22,7 +22,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
     %c127_i32 = arith.constant 127 : i32 loc(#loc1)
     %true = arith.constant true loc(#loc1)
     %c256_i32 = arith.constant 256 : i32 loc(#loc1)
-    %cst = arith.constant dense<0.000000e+00> : tensor<256x256xf32, #mma> loc(#loc1)
+    // %cst = arith.constant dense<0.000000e+00> : tensor<256x256xf32, #mma> loc(#loc1)
     llvm.intr.assume %true : i1 loc(#loc2)
     llvm.intr.assume %true : i1 loc(#loc3)
     llvm.intr.assume %true : i1 loc(#loc4)
@@ -82,8 +82,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 
     %44 = arith.addi %41, %43 : tensor<256x128xi32, #blocked> loc(#loc37)
 
-    %441 = amdgpu.extract_slice %44 [0, 0] : tensor<256x128xi32, #blocked> to tensor<128x128xi32, #blocked>
-    %442 = amdgpu.extract_slice %44 [128, 0] : tensor<256x128xi32, #blocked> to tensor<128x128xi32, #blocked>
+    %offsetsA0 = amdgpu.extract_slice %44 [0, 0] : tensor<256x128xi32, #blocked> to tensor<128x128xi32, #blocked>
+    %offsetsA1 = amdgpu.extract_slice %44 [128, 0] : tensor<256x128xi32, #blocked> to tensor<128x128xi32, #blocked>
 
     %45 = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32, #ttg.slice<{dim = 1, parent = #blocked2}>> loc(#loc38)
     %46 = tt.expand_dims %45 {axis = 1 : i32} : tensor<128xi32, #ttg.slice<{dim = 1, parent = #blocked2}>> -> tensor<128x1xi32, #blocked2> loc(#loc39)
@@ -94,8 +94,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
     %51 = tt.broadcast %50 : tensor<1x256xi32, #blocked2> -> tensor<128x256xi32, #blocked2> loc(#loc39)
     %52 = arith.addi %47, %51 : tensor<128x256xi32, #blocked2> loc(#loc39)
 
-    %521 = amdgpu.extract_slice %52 [0, 0] : tensor<128x256xi32, #blocked2> to tensor<128x128xi32, #blocked2>
-    %522 = amdgpu.extract_slice %52 [0, 128] : tensor<128x256xi32, #blocked2> to tensor<128x128xi32, #blocked2>
+    %offsetsB0 = amdgpu.extract_slice %52 [0, 0] : tensor<128x256xi32, #blocked2> to tensor<128x128xi32, #blocked2>
+    %offsetsB1 = amdgpu.extract_slice %52 [0, 128] : tensor<128x256xi32, #blocked2> to tensor<128x128xi32, #blocked2>
 
     %53 = tt.expand_dims %27 {axis = 1 : i32} : tensor<256xi32, #ttg.slice<{dim = 1, parent = #blocked1}>> -> tensor<256x1xi32, #blocked1> loc(#loc40)
     %54 = tt.make_range {end = 8 : i32, start = 0 : i32} : tensor<8xi32, #ttg.slice<{dim = 0, parent = #blocked1}>> loc(#loc41)
@@ -127,16 +127,27 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
     %80 = ttg.memdesc_subview %74[%c0_i32, %c0_i32, %c0_i32] : !ttg.memdesc<2x256x8xi8, #shared2, #smem, mutable> -> !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> loc(#loc51)
     %81 = amdgpu.buffer_load_to_local %arg4[%66] mask = %77 stride = %arg12 into %80 : <i8>[tensor<256x8xi32, #blocked1>]  -> <256x8xi8, #shared2, #smem, mutable> loc(#loc51)
     %82 = ttg.async_commit_group %81 loc(#loc51)
+
     %83 = ttg.memdesc_subview %71[%c0_i32, %c0_i32, %c0_i32] : !ttg.memdesc<2x256x128xi8, #shared, #smem, mutable> -> !ttg.memdesc<256x128xi8, #shared, #smem, mutable> loc(#loc48)
+
+
     %84 = tt.splat %75 : i1 -> tensor<256x128xi1, #blocked> loc(#loc52)
     %85 = amdgpu.buffer_load_to_local %arg0[%44] mask = %84 stride = %arg8 into %83 : <i8>[tensor<256x128xi32, #blocked>]  -> <256x128xi8, #shared, #smem, mutable> loc(#loc48)
     %86 = ttg.async_commit_group %85 loc(#loc48)
+
     %87 = ttg.memdesc_subview %72[%c0_i32, %c0_i32, %c0_i32] : !ttg.memdesc<2x128x256xi8, #shared1, #smem, mutable> -> !ttg.memdesc<128x256xi8, #shared1, #smem, mutable> loc(#loc49)
+
     %88 = tt.splat %75 : i1 -> tensor<128x256xi1, #blocked2> loc(#loc52)
     %89 = amdgpu.buffer_load_to_local %arg1[%52] mask = %88 stride = %arg9 into %87 : <i8>[tensor<128x256xi32, #blocked2>]  -> <128x256xi8, #shared1, #smem, mutable> loc(#loc49)
     %90 = ttg.async_commit_group %89 loc(#loc49)
     %91 = arith.subi %68, %c1_i32 : i32 loc(#loc52)
-    %92:16 = scf.for %arg13 = %c0_i32 to %91 step %c1_i32 iter_args(%arg14 = %cst, %arg15 = %arg3, %arg16 = %arg4, %arg17 = %arg0, %arg18 = %arg1, %arg19 = %c0_i32, %arg20 = %79, %arg21 = %82, %arg22 = %86, %arg23 = %90, %arg24 = %76, %arg25 = %80, %arg26 = %83, %arg27 = %83, %arg28 = %87, %arg29 = %87) -> (
+
+    %cst_tile_1 = arith.constant dense<-10.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
+    %cst_tile_2 = arith.constant dense<-10.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
+    %cst_tile_3 = arith.constant dense<-10.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
+    %cst_tile_4 = arith.constant dense<-10.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
+
+    %92:17 = scf.for %arg13 = %c0_i32 to %91 step %c1_i32 iter_args(%arg141 = %cst_tile_1, %arg142 = %cst_tile_2, %arg143 = %cst_tile_3, %arg144 = %cst_tile_4, %arg15 = %arg3, %arg16 = %arg4, %arg17 = %arg0, %arg18 = %arg1, %arg19 = %c0_i32, %arg20 = %79, %arg21 = %82, %arg22 = %86, %arg23 = %90, %arg24 = %76, %arg25 = %80, %arg26 = %83, %arg27 = %87) -> (
             // tensor<256x256xf32, #mma>,
             // !tt.ptr<i8>,
             // !tt.ptr<i8>,
@@ -153,7 +164,10 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
             // !ttg.memdesc<128x128xi8, #shared, #smem, mutable>,
             // !ttg.memdesc<128x128xi8, #shared1, #smem, mutable>,
             // !ttg.memdesc<128x128xi8, #shared1, #smem, mutable>
-        tensor<256x256xf32, #mma>,
+        tensor<128x128xf32, #mma>,
+        tensor<128x128xf32, #mma>,
+        tensor<128x128xf32, #mma>,
+        tensor<128x128xf32, #mma>,
         !tt.ptr<i8>,
         !tt.ptr<i8>,
         !tt.ptr<i8>,
@@ -165,15 +179,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
         !ttg.async.token,
         !ttg.memdesc<256x8xi8, #shared2, #smem, mutable>,
         !ttg.memdesc<256x8xi8, #shared2, #smem, mutable>,
-        !ttg.memdesc<128x128xi8, #shared, #smem, mutable>,
-        !ttg.memdesc<128x128xi8, #shared, #smem, mutable>,
-        !ttg.memdesc<128x128xi8, #shared1, #smem, mutable>,
-        !ttg.memdesc<128x128xi8, #shared1, #smem, mutable>
+        !ttg.memdesc<256x128xi8, #shared, #smem, mutable>,
+        !ttg.memdesc<128x256xi8, #shared1, #smem, mutable>
             )  : i32 {
-      // %arg26 ldsA0
-      // %arg27 ldsA1
-      // %arg28 ldsB1
-      // %arg29 ldsB2
 
       %135 = ttg.async_wait %arg20, %arg21, %arg22, %arg23 {num = 0 : i32} loc(#loc50)
       %136 = tt.addptr %arg17, %c128_i32 : !tt.ptr<i8>, i32 loc(#loc53)
@@ -183,6 +191,10 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
       %140 = arith.addi %arg19, %c1_i32 : i32 loc(#loc52)
       %141 = arith.cmpi slt, %140, %c2_i32 : i32 loc(#loc52)
       %142 = arith.select %141, %140, %c0_i32 : i32 loc(#loc52)
+
+      //------------------
+      // Prefetch scales
+      //-----------------
       %143 = ttg.memdesc_subview %73[%142, %c0_i32, %c0_i32] : !ttg.memdesc<2x256x8xi8, #shared2, #smem, mutable> -> !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> loc(#loc50)
       %144 = amdgpu.buffer_load_to_local %138[%60] stride = %arg11 into %143 : <i8>[tensor<256x8xi32, #blocked1>]  -> <256x8xi8, #shared2, #smem, mutable> loc(#loc50)
       %145 = ttg.async_commit_group %144 loc(#loc50)
@@ -192,67 +204,98 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 
       // Load A
       %151 = ttg.memdesc_subview %71[%142, %c0_i32, %c0_i32] : !ttg.memdesc<2x256x128xi8, #shared, #smem, mutable> -> !ttg.memdesc<256x128xi8, #shared, #smem, mutable> loc(#loc48)
-
       //------------------
       // AsyncCopy A0
       //------------------
       %1511 = ttg.memdesc_subview %151[%c0_i32, %c0_i32] : !ttg.memdesc<256x128xi8, #shared, #smem, mutable> -> !ttg.memdesc<128x128xi8, #shared, #smem, mutable>
-      %1521 = amdgpu.buffer_load_to_local %136[%441] stride = %arg8 into %1511 : <i8>[tensor<128x128xi32, #blocked>]  -> <128x128xi8, #shared, #smem, mutable> loc(#loc48)
+      %1521 = amdgpu.buffer_load_to_local %136[%offsetsA0] stride = %arg8 into %1511 : <i8>[tensor<128x128xi32, #blocked>]  -> <128x128xi8, #shared, #smem, mutable> loc(#loc48)
       //------------------
       // AsyncCopy A1
       //------------------
       %1512 = ttg.memdesc_subview %151[%c128_i32, %c0_i32] : !ttg.memdesc<256x128xi8, #shared, #smem, mutable> -> !ttg.memdesc<128x128xi8, #shared, #smem, mutable>
-      %1522 = amdgpu.buffer_load_to_local %136[%442] stride = %arg8 into %1512 : <i8>[tensor<128x128xi32, #blocked>]  -> <128x128xi8, #shared, #smem, mutable> loc(#loc48)
+      %1522 = amdgpu.buffer_load_to_local %136[%offsetsA1] stride = %arg8 into %1512 : <i8>[tensor<128x128xi32, #blocked>]  -> <128x128xi8, #shared, #smem, mutable> loc(#loc48)
 
+      // Combine both for now, for pingpong we need to loop carried both separately
       %153 = ttg.async_commit_group %1521, %1522 loc(#loc48)
 
       %155 = ttg.memdesc_subview %72[%142, %c0_i32, %c0_i32] : !ttg.memdesc<2x128x256xi8, #shared1, #smem, mutable> -> !ttg.memdesc<128x256xi8, #shared1, #smem, mutable> loc(#loc49)
-
       //------------------
       // AsyncCopy B0
       //------------------
       %1551 = ttg.memdesc_subview %155[%c0_i32, %c0_i32] : !ttg.memdesc<128x256xi8, #shared1, #smem, mutable> -> !ttg.memdesc<128x128xi8, #shared1, #smem, mutable>
-      %1561 = amdgpu.buffer_load_to_local %137[%521] stride = %arg9 into %1551 : <i8>[tensor<128x128xi32, #blocked2>]  -> <128x128xi8, #shared1, #smem, mutable> loc(#loc49)
+      %1561 = amdgpu.buffer_load_to_local %137[%offsetsB0] stride = %arg9 into %1551 : <i8>[tensor<128x128xi32, #blocked2>]  -> <128x128xi8, #shared1, #smem, mutable> loc(#loc49)
       //------------------
       // AsyncCopy B1
       //------------------
       %1552 = ttg.memdesc_subview %155[%c128_i32, %c0_i32] : !ttg.memdesc<128x256xi8, #shared1, #smem, mutable> -> !ttg.memdesc<128x128xi8, #shared1, #smem, mutable>
-      %1562 = amdgpu.buffer_load_to_local %137[%522] stride = %arg9 into %1552 : <i8>[tensor<128x128xi32, #blocked2>]  -> <128x128xi8, #shared1, #smem, mutable> loc(#loc49)
+      %1562 = amdgpu.buffer_load_to_local %137[%offsetsB1] stride = %arg9 into %1552 : <i8>[tensor<128x128xi32, #blocked2>]  -> <128x128xi8, #shared1, #smem, mutable> loc(#loc49)
 
+      // Combine both for now, for pingpong we need to loop carried both separately
       %157 = ttg.async_commit_group %1561, %1562 loc(#loc48)
 
       //------------------
       // LocalLoad Scales
       //------------------
-      %1461 = ttg.local_load %arg24 token %135 : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> tensor<256x8xi8, #linear1> loc(#loc50)
-      %1462 = ttg.local_load %arg24 token %135 : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> tensor<256x8xi8, #linear1> loc(#loc50)
-      %1501 = ttg.local_load %arg25 token %135 : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> tensor<256x8xi8, #linear2> loc(#loc51)
-      %1502 = ttg.local_load %arg25 token %135 : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> tensor<256x8xi8, #linear2> loc(#loc51)
+      %ldsViewScaleA0 = ttg.memdesc_subview %arg24[%c0_i32, %c0_i32] : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> !ttg.memdesc<128x8xi8, #shared2, #smem, mutable>
+      %ldsViewScaleA1 = ttg.memdesc_subview %arg24[%c128_i32, %c0_i32] : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> !ttg.memdesc<128x8xi8, #shared2, #smem, mutable>
+
+      %scaleA1 = ttg.local_load %ldsViewScaleA0 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear1> loc(#loc50)
+      %scaleA2 = ttg.local_load %ldsViewScaleA1 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear1> loc(#loc50)
+
+      %ldsViewScaleB0 = ttg.memdesc_subview %arg25[%c0_i32, %c0_i32] : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> !ttg.memdesc<128x8xi8, #shared2, #smem, mutable>
+      %ldsViewScaleB1 = ttg.memdesc_subview %arg25[%c128_i32, %c0_i32] : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> !ttg.memdesc<128x8xi8, #shared2, #smem, mutable>
+
+      %scaleB1 = ttg.local_load %ldsViewScaleB0 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear2> loc(#loc51)
+      %scaleB2 = ttg.local_load %ldsViewScaleB1 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear2> loc(#loc51)
 
       //------------------
       // Local load A0
       //------------------
-      %1541 = ttg.local_load %arg26 token %135 : !ttg.memdesc<128x128xi8, #shared, #smem, mutable> -> tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>> loc(#loc48)
+      %ldsLoadA1 = ttg.memdesc_subview %arg26[%c0_i32, %c0_i32] : !ttg.memdesc<256x128xi8, #shared, #smem, mutable> -> !ttg.memdesc<128x128xi8, #shared, #smem, mutable>
+      %tileA1 = ttg.local_load %ldsLoadA1 token %135 : !ttg.memdesc<128x128xi8, #shared, #smem, mutable> -> tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>> loc(#loc48)
       //------------------
       // Local load A1
       //------------------
-      %1542 = ttg.local_load %arg27 token %135 : !ttg.memdesc<128x128xi8, #shared, #smem, mutable> -> tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>> loc(#loc48)
+      %ldsLoadA2 = ttg.memdesc_subview %arg26[%c128_i32, %c0_i32] : !ttg.memdesc<256x128xi8, #shared, #smem, mutable> -> !ttg.memdesc<128x128xi8, #shared, #smem, mutable>
+      %tileA2 = ttg.local_load %ldsLoadA2 token %135 : !ttg.memdesc<128x128xi8, #shared, #smem, mutable> -> tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>> loc(#loc48)
 
       //------------------
       // Local load B0
       //------------------
-      %1581 = ttg.local_load %arg28 token %135 : !ttg.memdesc<128x128xi8, #shared1, #smem, mutable> -> tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>> loc(#loc49)
+      %ldsLoadB1 = ttg.memdesc_subview %arg27[%c0_i32, %c0_i32] : !ttg.memdesc<128x256xi8, #shared1, #smem, mutable> -> !ttg.memdesc<128x128xi8, #shared1, #smem, mutable>
+      %tileB1 = ttg.local_load %ldsLoadB1 token %135 : !ttg.memdesc<128x128xi8, #shared1, #smem, mutable> -> tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>> loc(#loc49)
 
       //------------------
       // Local load B1
       //------------------
-      %1582 = ttg.local_load %arg29 token %135 : !ttg.memdesc<128x128xi8, #shared1, #smem, mutable> -> tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>> loc(#loc49)
+      %ldsLoadB2 = ttg.memdesc_subview %arg27[%c0_i32, %c128_i32] : !ttg.memdesc<128x256xi8, #shared1, #smem, mutable> -> !ttg.memdesc<128x128xi8, #shared1, #smem, mutable>
+      %tileB2 = ttg.local_load %ldsLoadB2 token %135 : !ttg.memdesc<128x128xi8, #shared1, #smem, mutable> -> tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>> loc(#loc49)
 
-      %159 = tt.dot_scaled %1541 scale %1461, %1581 scale %150, %arg14 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2> -> tensor<128x128xf32, #mma> loc(#loc57)
+      //------------------
+      // Dot slice1 A1 * B1
+      //------------------
+      %1591 = tt.dot_scaled %tileA1 scale %scaleA1, %tileB1 scale %scaleB1, %arg141 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2> -> tensor<128x128xf32, #mma> loc(#loc57)
 
-      %159 = tt.dot_scaled %154 scale %146, %158 scale %150, %arg14 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<256x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<256x8xi8, #linear1> * tensor<128x256xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<256x8xi8, #linear2> -> tensor<256x256xf32, #mma> loc(#loc57)
-      scf.yield %159, %138, %139, %136, %137, %142, %145, %149, %153, %157, %143, %147, %1511, %1512, %1551, %1552 :
-        tensor<256x256xf32, #mma>,
+      //------------------
+      // Dot slice2 A2 * B1
+      //------------------
+      %1592 = tt.dot_scaled %tileA2 scale %scaleA2, %tileB1 scale %scaleB1, %arg143 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2> -> tensor<128x128xf32, #mma> loc(#loc57)
+
+      //------------------
+      // Dot slice2 A1 * B2
+      //------------------
+      %1593 = tt.dot_scaled %tileA1 scale %scaleA1, %tileB2 scale %scaleB2, %arg142 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2> -> tensor<128x128xf32, #mma> loc(#loc57)
+
+      //------------------
+      // Dot slice3 A2*B2
+      //------------------
+      %1594 = tt.dot_scaled %tileA2 scale %scaleA2, %tileB2 scale %scaleB2, %arg144 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2> -> tensor<128x128xf32, #mma> loc(#loc57)
+
+      scf.yield %1591, %1592, %1593, %1594, %138, %139, %136, %137, %142, %145, %149, %153, %157, %143, %147, %151, %155 :
+        tensor<128x128xf32, #mma>,
+        tensor<128x128xf32, #mma>,
+        tensor<128x128xf32, #mma>,
+        tensor<128x128xf32, #mma>,
         !tt.ptr<i8>,
         !tt.ptr<i8>,
         !tt.ptr<i8>,
@@ -264,24 +307,32 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
         !ttg.async.token,
         !ttg.memdesc<256x8xi8, #shared2, #smem, mutable>,
         !ttg.memdesc<256x8xi8, #shared2, #smem, mutable>,
-        !ttg.memdesc<128x128xi8, #shared, #smem, mutable>,
-        !ttg.memdesc<128x128xi8, #shared, #smem, mutable>,
-        !ttg.memdesc<128x128xi8, #shared1, #smem, mutable>,
-        !ttg.memdesc<128x128xi8, #shared1, #smem, mutable>
+        !ttg.memdesc<256x128xi8, #shared, #smem, mutable>,
+        !ttg.memdesc<128x256xi8, #shared1, #smem, mutable>
     } loc(#loc52)
+
+    // Combine dot slices
+    %dot_result = amdgpu.concat %92#0, %92#1, %92#2, %92#3 :
+      tensor<128x128xf32, #mma>,
+      tensor<128x128xf32, #mma>,
+      tensor<128x128xf32, #mma>,
+      tensor<128x128xf32, #mma>
+      -> tensor<256x256xf32, #mma>
+
+
     %93 = arith.cmpi sge, %68, %c1_i32 : i32 loc(#loc52)
-    %94 = ttg.async_wait %92#6, %92#7, %92#8, %92#9 {num = 0 : i32} loc(#loc50)
-    %95 = ttg.local_load %92#10 token %94 : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> tensor<256x8xi8, #linear1> loc(#loc50)
-    %96 = ttg.local_load %92#11 token %94 : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> tensor<256x8xi8, #linear2> loc(#loc51)
-    %97 = ttg.local_load %92#12 token %94 : !ttg.memdesc<256x128xi8, #shared, #smem, mutable> -> tensor<256x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>> loc(#loc48)
-    %98 = ttg.local_load %92#13 token %94 : !ttg.memdesc<128x256xi8, #shared1, #smem, mutable> -> tensor<128x256xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>> loc(#loc49)
+    %94 = ttg.async_wait %92#9, %92#10, %92#11, %92#12 {num = 0 : i32} loc(#loc50)
+    %95 = ttg.local_load %92#13 token %94 : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> tensor<256x8xi8, #linear1> loc(#loc50)
+    %96 = ttg.local_load %92#14 token %94 : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> tensor<256x8xi8, #linear2> loc(#loc51)
+    %97 = ttg.local_load %92#15 token %94 : !ttg.memdesc<256x128xi8, #shared, #smem, mutable> -> tensor<256x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>> loc(#loc48)
+    %98 = ttg.local_load %92#16 token %94 : !ttg.memdesc<128x256xi8, #shared1, #smem, mutable> -> tensor<128x256xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>> loc(#loc49)
     %99 = scf.if %93 -> (tensor<256x256xf32, #mma>) {
-      %135 = tt.dot_scaled %97 scale %95, %98 scale %96, %92#0 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<256x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<256x8xi8, #linear1> * tensor<128x256xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<256x8xi8, #linear2> -> tensor<256x256xf32, #mma> loc(#loc57)
+      %135 = tt.dot_scaled %97 scale %95, %98 scale %96, %dot_result lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<256x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<256x8xi8, #linear1> * tensor<128x256xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<256x8xi8, #linear2> -> tensor<256x256xf32, #mma> loc(#loc57)
       scf.yield %135 : tensor<256x256xf32, #mma> loc(#loc57)
     } else {
-      scf.yield %92#0 : tensor<256x256xf32, #mma> loc(#loc57)
+      scf.yield %dot_result : tensor<256x256xf32, #mma> loc(#loc57)
     } loc(#loc57)
-    %100 = arith.select %93, %99, %92#0 : tensor<256x256xf32, #mma> loc(#loc52)
+    %100 = arith.select %93, %99, %dot_result : tensor<256x256xf32, #mma> loc(#loc52)
     ttg.local_dealloc %71 : !ttg.memdesc<2x256x128xi8, #shared, #smem, mutable> loc(#loc52)
     ttg.local_dealloc %72 : !ttg.memdesc<2x128x256xi8, #shared1, #smem, mutable> loc(#loc52)
     ttg.local_dealloc %73 : !ttg.memdesc<2x256x8xi8, #shared2, #smem, mutable> loc(#loc52)
