@@ -4,6 +4,10 @@
 #linear = #ttg.linear<{register = [[0, 1], [0, 2], [0, 4], [64, 0], [128, 0], [0, 64], [0, 128]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [0, 8]], warp = [[0, 16], [0, 32], [32, 0]], block = []}>
 #linear1 = #ttg.linear<{register = [[0, 2], [0, 4], [64, 0], [128, 0]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [0, 1]], warp = [[0, 0], [0, 0], [32, 0]], block = []}>
 #linear2 = #ttg.linear<{register = [[0, 2], [0, 4], [128, 0]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [0, 1]], warp = [[32, 0], [64, 0], [0, 0]], block = []}>
+
+#linear1_a_slice = #ttg.linear<{register = [[0, 2], [0, 4], [64, 0]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [0, 1]], warp = [[0, 0], [0, 0], [32, 0]], block = []}>
+#linear2_b_slice = #ttg.linear<{register = [[0, 2], [0, 4]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [16, 0], [0, 1]], warp = [[32, 0], [64, 0], [0, 0]], block = []}>
+
 #loc = loc("/home/aweinrau/aiter/aiter/ops/triton/gemm_afp4wfp4.py":16:0)
 #mma = #ttg.amd_mfma<{versionMajor = 4, versionMinor = 0, warpsPerCTA = [2, 4], instrShape = [32, 32], isTransposed = true}>
 #shared = #ttg.swizzled_shared<{vec = 16, perPhase = 2, maxPhase = 8, order = [1, 0]}>
@@ -142,10 +146,10 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
     %90 = ttg.async_commit_group %89 loc(#loc49)
     %91 = arith.subi %68, %c1_i32 : i32 loc(#loc52)
 
-    %cst_tile_1 = arith.constant dense<-10.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
-    %cst_tile_2 = arith.constant dense<-10.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
-    %cst_tile_3 = arith.constant dense<-10.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
-    %cst_tile_4 = arith.constant dense<-10.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
+    %cst_tile_1 = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
+    %cst_tile_2 = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
+    %cst_tile_3 = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
+    %cst_tile_4 = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #mma> loc(#loc1)
 
     %92:17 = scf.for %arg13 = %c0_i32 to %91 step %c1_i32 iter_args(%arg141 = %cst_tile_1, %arg142 = %cst_tile_2, %arg143 = %cst_tile_3, %arg144 = %cst_tile_4, %arg15 = %arg3, %arg16 = %arg4, %arg17 = %arg0, %arg18 = %arg1, %arg19 = %c0_i32, %arg20 = %79, %arg21 = %82, %arg22 = %86, %arg23 = %90, %arg24 = %76, %arg25 = %80, %arg26 = %83, %arg27 = %87) -> (
             // tensor<256x256xf32, #mma>,
@@ -239,14 +243,14 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
       %ldsViewScaleA0 = ttg.memdesc_subview %arg24[%c0_i32, %c0_i32] : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> !ttg.memdesc<128x8xi8, #shared2, #smem, mutable>
       %ldsViewScaleA1 = ttg.memdesc_subview %arg24[%c128_i32, %c0_i32] : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> !ttg.memdesc<128x8xi8, #shared2, #smem, mutable>
 
-      %scaleA1 = ttg.local_load %ldsViewScaleA0 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear1> loc(#loc50)
-      %scaleA2 = ttg.local_load %ldsViewScaleA1 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear1> loc(#loc50)
+      %scaleA1 = ttg.local_load %ldsViewScaleA0 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear1_a_slice> loc(#loc50)
+      %scaleA2 = ttg.local_load %ldsViewScaleA1 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear1_a_slice> loc(#loc50)
 
       %ldsViewScaleB0 = ttg.memdesc_subview %arg25[%c0_i32, %c0_i32] : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> !ttg.memdesc<128x8xi8, #shared2, #smem, mutable>
       %ldsViewScaleB1 = ttg.memdesc_subview %arg25[%c128_i32, %c0_i32] : !ttg.memdesc<256x8xi8, #shared2, #smem, mutable> -> !ttg.memdesc<128x8xi8, #shared2, #smem, mutable>
 
-      %scaleB1 = ttg.local_load %ldsViewScaleB0 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear2> loc(#loc51)
-      %scaleB2 = ttg.local_load %ldsViewScaleB1 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear2> loc(#loc51)
+      %scaleB1 = ttg.local_load %ldsViewScaleB0 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear2_b_slice> loc(#loc51)
+      %scaleB2 = ttg.local_load %ldsViewScaleB1 token %135 : !ttg.memdesc<128x8xi8, #shared2, #smem, mutable> -> tensor<128x8xi8, #linear2_b_slice> loc(#loc51)
 
       //------------------
       // Local load A0
@@ -274,24 +278,24 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
       //------------------
       // Dot slice1 A1 * B1
       //------------------
-      %1591 = tt.dot_scaled %tileA1 scale %scaleA1, %tileB1 scale %scaleB1, %arg141 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2> -> tensor<128x128xf32, #mma> loc(#loc57)
+      %dot1 = tt.dot_scaled %tileA1 scale %scaleA1, %tileB1 scale %scaleB1, %arg141 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1_a_slice> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2_b_slice> -> tensor<128x128xf32, #mma> loc(#loc57)
 
       //------------------
       // Dot slice2 A2 * B1
       //------------------
-      %1592 = tt.dot_scaled %tileA2 scale %scaleA2, %tileB1 scale %scaleB1, %arg143 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2> -> tensor<128x128xf32, #mma> loc(#loc57)
+      %dot2 = tt.dot_scaled %tileA2 scale %scaleA2, %tileB1 scale %scaleB1, %arg142 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1_a_slice> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2_b_slice> -> tensor<128x128xf32, #mma> loc(#loc57)
 
       //------------------
       // Dot slice2 A1 * B2
       //------------------
-      %1593 = tt.dot_scaled %tileA1 scale %scaleA1, %tileB2 scale %scaleB2, %arg142 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2> -> tensor<128x128xf32, #mma> loc(#loc57)
+      %dot3 = tt.dot_scaled %tileA1 scale %scaleA1, %tileB2 scale %scaleB2, %arg143 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1_a_slice> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2_b_slice> -> tensor<128x128xf32, #mma> loc(#loc57)
 
       //------------------
       // Dot slice3 A2*B2
       //------------------
-      %1594 = tt.dot_scaled %tileA2 scale %scaleA2, %tileB2 scale %scaleB2, %arg144 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2> -> tensor<128x128xf32, #mma> loc(#loc57)
+      %dot4 = tt.dot_scaled %tileA2 scale %scaleA2, %tileB2 scale %scaleB2, %arg144 lhs = e2m1 rhs = e2m1 {fastMath = false} : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear1_a_slice> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>, tensor<128x8xi8, #linear2_b_slice> -> tensor<128x128xf32, #mma> loc(#loc57)
 
-      scf.yield %1591, %1592, %1593, %1594, %138, %139, %136, %137, %142, %145, %149, %153, %157, %143, %147, %151, %155 :
+      scf.yield %dot1, %dot2, %dot3, %dot4, %138, %139, %136, %137, %142, %145, %149, %153, %157, %143, %147, %151, %155 :
         tensor<128x128xf32, #mma>,
         tensor<128x128xf32, #mma>,
         tensor<128x128xf32, #mma>,
