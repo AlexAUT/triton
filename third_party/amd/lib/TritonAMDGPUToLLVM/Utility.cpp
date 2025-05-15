@@ -4,6 +4,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/IR/PatternMatch.h"
+#include "third_party/amd/include/TritonAMDGPUToLLVM/AsyncUtility.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
@@ -734,8 +735,9 @@ void addAsyncCopyAliasScope(AliasAnalysisOpInterface directToLdsOp) {
 void addLocalLoadNoAliasScope(triton::gpu::LocalLoadOp localLoadOp,
                               AliasAnalysisOpInterface llLoadOp) {
   auto token = localLoadOp.getToken();
-  if (!token || !token.getDefiningOp<tt::gpu::AsyncWaitOp>())
+  if (!token || !triton::AMD::comesFromAsyncWait(token)) {
     return;
+  }
 
   return addLocalLoadNoAliasScope(llLoadOp);
 }
