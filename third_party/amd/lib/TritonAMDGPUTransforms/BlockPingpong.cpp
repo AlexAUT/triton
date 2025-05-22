@@ -1200,12 +1200,31 @@ SmallVector<Value> Pingponger::genSplitAsyncCopy(OpBuilder &builder, Value v,
       memDesc.getMemorySpace(), memDesc.getMutableMemory(),
       memDesc.getAllocShape());
 
+  auto maybeSliceTensor = [&builder, &loc](Value tensor,
+                                           ArrayRef<int64_t> newShape,
+                                           DenseI64ArrayAttr offsets) {
+    if (tensor) {
+      auto tensorTy = cast<RankedTensorType>(tensor.getType());
+      auto slicedTy = RankedTensorType::get(newShape, tensorTy.getElementType(),
+                                            tensorTy.getEncoding());
+      tensor = builder.create<triton::amdgpu::ExtractSliceOp>(loc, slicedTy,
+                                                              tensor, offsets);
+    }
+    return tensor;
+  };
+
   SmallVector<Value> tokens;
   for (int i = 0; i < numSlices; i++) {
     SmallVector<int64_t> offsets(shape.size(), 0);
     offsets[sliceDim] = sliceWidth * i;
-    Value slicedSrc = builder.create<triton::amdgpu::ExtractSliceOp>(
-        loc, splitTy, copyOp.getSrc(), builder.getDenseI64ArrayAttr(offsets));
+    auto offsetsAttr = builder.getDenseI64ArrayAttr(offsets);
+
+    Value slicedSrc = maybeSliceTensor(copyOp.getSrc(), shape, offsetsAttr);
+    assert(slicedSrc);
+    Value maybeSlicedMask =
+        maybeSliceTensor(copyOp.getMask(), shape, offsetsAttr);
+    Value maybeSlicedOther =
+        maybeSliceTensor(copyOp.getOther(), shape, offsetsAttr);
 
     SmallVector<Value> offsetVals;
     for (auto &o : offsets)
@@ -1215,7 +1234,7 @@ SmallVector<Value> Pingponger::genSplitAsyncCopy(OpBuilder &builder, Value v,
         copyOp.getLoc(), subviewDescType, copyOp.getResult(), offsetVals);
 
     Value slicedCopy = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
-        loc, slicedSrc, subview, copyOp.getMask(), copyOp.getOther(),
+        loc, slicedSrc, subview, maybeSlicedMask, maybeSlicedOther,
         copyOp.getCache(), copyOp.getEvict(), copyOp.getIsVolatile());
     Value commit = builder.create<ttg::AsyncCommitGroupOp>(
         loc, slicedCopy.getType(), ValueRange(slicedCopy));
