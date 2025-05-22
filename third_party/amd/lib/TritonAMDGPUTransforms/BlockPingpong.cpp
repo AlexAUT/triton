@@ -1419,12 +1419,15 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   appendLocalLoadOp(sliceOperandB1.getDefiningOp());
   appendLocalLoadOp(sliceScaleA1.getDefiningOp());
   appendLocalLoadOp(sliceScaleB1.getDefiningOp());
-  // TODO add async wait B1
+  // Async wait B1
   appendAsyncWaitOp(
       builder.create<ttg::AsyncWaitOp>(loc, loopCarriedTokensSliceB[1], 0));
 
   appendOp(dot1.getDefiningOp());
-  // TODO add barrier
+  // gpu.barrier
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<ROCDL::SBarrierOp>(loc));
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
   // B1
   appendOp(slicedBTokens[1].getDefiningOp()->getOperand(0).getDefiningOp());
   appendOp(slicedBTokens[1].getDefiningOp());
@@ -1439,7 +1442,10 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
 
   appendOp(dot2.getDefiningOp());
 
-  // TODO barrier
+  // gpu.barrier
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
+  appendOp(builder.create<ROCDL::SBarrierOp>(loc));
+  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
 
   // A1
   appendOp(slicedATokens[1].getDefiningOp()->getOperand(0).getDefiningOp());
