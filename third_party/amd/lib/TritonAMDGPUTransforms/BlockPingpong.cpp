@@ -1474,17 +1474,6 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   commitB->erase();
   asyncCopyOps[3]->erase();
 
-  // asyncCopyOps[2]->erase();
-  // asyncCopyOps[3]->erase();
-
-  // oldCommit->erase();
-  // asyncLoadA->erase();
-
-  //  ::mlir::triton::ScaleDotElemTypeAttr a_elem_type,
-  //  ::mlir::triton::ScaleDotElemTypeAttr b_elem_type, ::mlir::BoolAttr
-  //  fastMath, ::mlir::BoolAttr lhs_k_pack = nullptr, ::mlir::BoolAttr
-  //  rhs_k_pack = nullptr);
-
   // --------- Debug concat everything back together
   // auto concatScaleA = builder.create<triton::amdgpu::ConcatOp>(
   //     loc, aScale.getType(), ValueRange{sliceScaleA1, sliceScaleA2});
