@@ -1511,44 +1511,6 @@ LogicalResult Pingponger::transformFP4mn(OpBuilder &builder, Location loc) {
   //     slicedAcc3});
   // dotSOps[0].getCMutable().assign(accConcat);
 
-  return success(0);
-
-  builder.setInsertionPointAfter(forOp);
-
-  // FIXME: This is duplicated code, need to refactorize.
-  auto i32ty = builder.getIntegerType(32);
-  auto workIDX = builder.create<ROCDL::ThreadIdXOp>(loc, i32ty);
-  workIDX->moveBefore(forOp);
-  builder.setInsertionPointAfter(workIDX);
-  auto constZero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
-  auto constWarpSize = builder.create<arith::ConstantIntOp>(loc, 256, 32);
-  auto warpIDX = builder.create<arith::DivSIOp>(loc, workIDX, constWarpSize);
-  auto warpLow = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
-                                               warpIDX, constZero);
-  auto warpHigh = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ne,
-                                                warpIDX, constZero);
-
-  builder.setInsertionPointAfter(dotSOps[0]);
-
-  if (sliceDotScaled(builder, loc, dotSOps[0], 4).failed())
-    return failure();
-  updateOpInsertion(dotSliceOps[0]);
-
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpLow));
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  for (int j = 0; j < 4; j++) {
-    for (int i = 0; i < 4; i++)
-      appendOp(subViewOps[i][j]);
-    for (int i = 0; i < 4; i++)
-      appendOp(loadSliceOps[i][j]);
-    appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-    appendOp(dotSliceOps[j]);
-  }
-
-  appendOp(builder.create<ROCDL::SchedBarrier>(loc, 0));
-  appendOp(builder.create<tt::amdgpu::CondBarrierOp>(loc, warpHigh));
-
   return success();
 }
 
