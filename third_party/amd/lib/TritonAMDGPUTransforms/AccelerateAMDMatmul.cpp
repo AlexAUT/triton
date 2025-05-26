@@ -61,6 +61,7 @@ SmallVector<unsigned, 3>
 warpsPerTile(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps,
              std::pair<int64_t, int64_t> shapePerWarp) {
   auto rank = shape.size();
+  return {1, static_cast<unsigned>(numWarps)};
   // Case 1: Early exit for batched matmul
   if (rank == 3)
     return {static_cast<unsigned>(numWarps), 1, 1};
