@@ -5,6 +5,7 @@
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/SchedInstructions.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Dialect/Triton/IR/OpInterfaces.h"
+#include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipelineExpander.h"
@@ -568,7 +569,12 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
         // op for the mfma layout to deduce operand index and other information.
         unsigned opIdx;
         if (auto dotEnc = getDotEncoding(userResult, &opIdx)) {
-          unsigned vecSize = llEnc.getLinearLayout().getNumConsecutiveInOut();
+          auto order =
+              cast<ttg::BlockedEncodingAttr>(srcTy.getEncoding()).getOrder();
+          auto newOutDims = triton::applyPermutation(
+              to_vector(llEnc.getLinearLayout().getOutDimNames()), order);
+          auto llFixedOrder = llEnc.getLinearLayout().transposeOuts(newOutDims);
+          unsigned vecSize = llFixedOrder.getNumConsecutiveInOut();
           LDBG("deduced opIdx: " << opIdx << "; deduced vecSize: " << vecSize);
           tempAttr = dotEnc.composeSharedLayoutForOperand(
               ctaLayout, opIdx, srcTy.getShape(), order, vecSize, bitWidth,
