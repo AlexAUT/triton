@@ -535,7 +535,7 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
       if (!getSharedEncIfAllUsersAreDotEnc(userResult).has_value())
         return std::nullopt;
     } else {
-      if (!isa<ttg::LocalLoadOp, ttg::ConvertLayoutOp>(user))
+      if (!isa<ttg::LocalLoadOp, ttg::ConvertLayoutOp, triton::ReshapeOp>(user))
         return std::nullopt;
 
       auto srcTy = cast<ttg::TensorOrMemDesc>(loadedValue.getType());
@@ -1077,7 +1077,8 @@ void labelLoadOpsForTritonDot(scf::ForOp forOp) {
 struct PipelinePass : public TritonAMDGPUStreamPipelineBase<PipelinePass> {
   PipelinePass() = default;
   PipelinePass(int32_t _numStages, int32_t _globalPrefetch,
-               int32_t _localPrefetch, bool _useAsyncCopy, bool _bypassLDSForScales) {
+               int32_t _localPrefetch, bool _useAsyncCopy,
+               bool _bypassLDSForScales) {
     this->numStages = _numStages;
 
     this->globalPrefetch = _globalPrefetch;
