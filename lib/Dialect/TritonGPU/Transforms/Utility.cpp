@@ -516,7 +516,7 @@ Attribute inferSrcEncoding(Operation *op, Attribute encoding) {
   if (op->hasTrait<mlir::OpTrait::SameOperandsAndResultEncoding>() ||
       op->hasTrait<mlir::OpTrait::SameLoadStoreOperandsAndResultEncoding>() ||
       op->hasTrait<mlir::OpTrait::Elementwise>() ||
-      isa<scf::WhileOp, scf::YieldOp, scf::ConditionOp,
+      isa<scf::WhileOp, scf::YieldOp, scf::ConditionOp, scf::ForOp,
           nvidia_gpu::WarpGroupDotWaitOp>(op)) {
     return encoding;
   }
@@ -876,8 +876,8 @@ LogicalResult getConvertBackwardSlice(
       continue;
     // Skip propagating through for op results for now.
     // TODO: enable this based on needs.
-    if (currentValue.getDefiningOp<scf::ForOp>())
-      return failure();
+    // if (currentValue.getDefiningOp<scf::ForOp>())
+    //   return failure();
     if (failed(updateLayout(currentValue, encoding)))
       return failure();
 
