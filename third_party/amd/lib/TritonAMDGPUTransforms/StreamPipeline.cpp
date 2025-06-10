@@ -237,6 +237,16 @@ void createAndScheduleAsyncCopy(
 
   ttg::MemDescType allocTy = cast<ttg::MemDescType>(alloc.getType());
 
+  auto sharedOrder = ttg::getOrder(allocTy);
+  auto blockedOrder = ttg::getOrder(cast<RankedTensorType>(src.getType()));
+  // We cannot reorder the elements in registers so this would lower the vector
+  // size of the loads to vecSize=1, AMDCoalesceAsyncCopy will adjust the
+  // blocked layout. AsyncCopy does not work for loads smaller than 32bit so we
+  // fall back to pipeline in registers
+  if (allocTy.getElementTypeBitWidth() < 32 && sharedOrder != blockedOrder) {
+    return false;
+  }
+
   // Extract local subview from shared allocation
   Value zero = builder.create<arith::ConstantIntOp>(forOp.getLoc(), 0, 32);
   SmallVector<Value> loadOffsets(allocTy.getRank(), zero);
