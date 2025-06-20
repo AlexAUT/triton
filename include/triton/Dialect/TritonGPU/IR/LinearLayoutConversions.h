@@ -17,6 +17,7 @@ class SwizzledSharedEncodingAttr;
 class NVMMASharedEncodingAttr;
 class AMDRotatingSharedEncodingAttr;
 class AMDMfmaEncodingAttr;
+class MemDescType;
 
 // - BlockedEncodingAttrs have the following input dimensions.
 //
@@ -297,6 +298,9 @@ LinearLayout nvidiaMmaTile(MLIRContext *ctx, ArrayRef<unsigned> tileShape,
 // store instructions. Since it closely resembles mfmaLayout, conversion between
 // the two can be done using transferWithinWarp, without involving LDS
 std::optional<LinearLayout> chooseMfmaLikeStoreLayout(RankedTensorType valType);
+
+// Computes the LL going from register to shared memory offsets
+LinearLayout getRegToSharedLayout(RankedTensorType srcTy, MemDescType dstTy);
 
 } // namespace mlir::triton::gpu
 #endif // TRITON_DIALECT_TRITONGPU_IR_LINEARLAYOUTCONVERSIONS_H
