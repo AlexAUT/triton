@@ -170,17 +170,14 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
       return failure();
     }
     // Compute the blocked -> shared linear layout to check preconditions
-    auto shape = srcTy.getShape();
-    LinearLayout srcLayout =
-        triton::gpu::toLinearLayout(shape, srcTy.getEncoding());
-    LinearLayout sharedLayout =
-        triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
-    LinearLayout srcToSharedLayout = srcLayout.invertAndCompose(sharedLayout);
+    LinearLayout srcToSharedLayout =
+        triton::gpu::getRegToSharedLayout(srcTy, dstTy);
 
     unsigned threadsPerWarp = lookupThreadsPerWarp(rewriter);
     if (!hasSwizzling && !LLVM::AMD::canCoalesceWriteIntoSharedMemory(
                              rewriter, srcToSharedLayout, threadsPerWarp)) {
       LDBG(op << " does not write coalesced into LDS and is not swizzled");
+      LDBG(op << " srcToShared: " << srcToSharedLayout);
       return failure();
     }
 
@@ -583,10 +580,12 @@ struct BufferLoadToLocalOpConversion
       otherElems = unpackLLElements(loc, llOther, rewriter);
 
     auto dstTy = op.getDest().getType();
-    auto sharedEnc = cast<SwizzledSharedEncodingAttr>(dstTy.getEncoding());
+    auto paddedEnc = dyn_cast<PaddedSharedEncodingAttr>(dstTy.getEncoding());
+    auto sharedEnc = dyn_cast<SwizzledSharedEncodingAttr>(dstTy.getEncoding());
+    assert(paddedEnc || sharedEnc);
     auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
 
-    bool hasSwizzling = sharedEnc.getMaxPhase() != 1;
+    bool hasSwizzling = !paddedEnc && sharedEnc.getMaxPhase() != 1;
     if (failed(canWriteCoalesced(rewriter, op, ptrType, dstTy, vec,
                                  hasSwizzling))) {
       return failure();
