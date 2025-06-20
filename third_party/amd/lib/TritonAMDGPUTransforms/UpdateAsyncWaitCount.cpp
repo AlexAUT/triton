@@ -31,11 +31,8 @@ namespace ttg = triton::gpu;
 // memory.
 int getNumberOfLoadInstructions(RankedTensorType srcTy,
                                 ttg::MemDescType dstTy) {
-  auto shape = srcTy.getShape();
-  LinearLayout srcLayout = tt::gpu::toLinearLayout(shape, srcTy.getEncoding());
-  LinearLayout sharedLayout =
-      tt::gpu::toLinearLayout(shape, dstTy.getEncoding());
-  LinearLayout srcToSharedLayout = srcLayout.invertAndCompose(sharedLayout);
+  LinearLayout srcToSharedLayout =
+      triton::gpu::getRegToSharedLayout(srcTy, dstTy);
 
   // On GFX9 we cannot split direct to lds loads into multiple ones because we
   // need coalesced writes. So we can divide the number of registers by the
