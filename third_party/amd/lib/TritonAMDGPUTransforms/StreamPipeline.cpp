@@ -7,6 +7,7 @@
 #include "triton/Dialect/Triton/IR/OpInterfaces.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/TritonGPUInterfaces.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipelineExpander.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Schedule.h"
@@ -121,7 +122,7 @@ enum SchedType {
 
 struct LoadInfo {
   // Shared layout is used for loads feeding into dot ops.
-  ttg::SwizzledSharedEncodingAttr sharedEncoding = nullptr;
+  ttg::SharedEncodingTrait sharedEncoding = nullptr;
   // The distance of this load's stage to its use' stage.
   int distToUse = 0;
   Operation *use = nullptr;
@@ -411,22 +412,22 @@ static ttg::AMDMfmaEncodingAttr getDotEncoding(Value inputValue,
 // If all the transitive uses of the given value have are used by a convert to
 // the same dot operand encoding, return true and get the shared encoding that
 // needs to be used to be compatible with users' layouts.
-static std::optional<ttg::SwizzledSharedEncodingAttr>
-getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
-  ttg::SwizzledSharedEncodingAttr attr;
+static std::optional<ttg::SharedEncodingTrait>
+getSharedEncIfAllUsersAreDotEnc(bool usePaddedLayout, Value loadedValue) {
+  ttg::SharedEncodingTrait attr;
   for (Operation *user : loadedValue.getUsers()) {
     LDBG(" getSharedEncIfAllUsersAreDotEnc current user: " << *user);
     if (user->getNumResults() != 1)
       return std::nullopt;
 
-    ttg::SwizzledSharedEncodingAttr tempAttr;
+    ttg::SharedEncodingTrait tempAttr;
     Value userResult = user->getResult(0);
     Type userResType = userResult.getType();
     if (auto memDesc = dyn_cast<ttg::MemDescType>(userResType)) {
       // First time we find a shared encoding in the chain, save it and try to
       // use it if it is compatible with the other users.
-      tempAttr = cast<ttg::SwizzledSharedEncodingAttr>(memDesc.getEncoding());
-      if (!getSharedEncIfAllUsersAreDotEnc(userResult).has_value())
+      tempAttr = cast<ttg::SharedEncodingTrait>(memDesc.getEncoding());
+      if (!getSharedEncIfAllUsersAreDotEnc(usePaddedLayout, userResult))
         return std::nullopt;
     } else {
       if (!isa<ttg::LocalLoadOp, ttg::ConvertLayoutOp>(user))
@@ -453,9 +454,15 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
 
       auto userResEnc = cast<ttg::TensorOrMemDesc>(userResType).getEncoding();
       if (auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(userResEnc)) {
-        tempAttr = ttg::SwizzledSharedEncodingAttr::get(
-            loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
-            ctaLayout, bitWidth, /*needTrans=*/false);
+        if (usePaddedLayout) {
+          tempAttr = ttg::PaddedSharedEncodingAttr::get(
+              loadedValue.getContext(), srcTy.getShape(), sharedOrder,
+              dotOpEnc.getKWidth(), bitWidth, ctaLayout);
+        } else {
+          tempAttr = ttg::SwizzledSharedEncodingAttr::get(
+              loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
+              ctaLayout, bitWidth, /*needTrans=*/false);
+        }
       } else if (auto llEnc = dyn_cast<ttg::LinearEncodingAttr>(userResEnc)) {
         // We use linear layout directly for scaled dot fp8 operands. For such
         // cases, we need to look further down the def-use chain to find the dot
@@ -612,6 +619,7 @@ SmallVector<std::pair<Operation *, Value>> createAndScheduleStreamOps(
 LogicalResult preprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
                                              int stages[SCHED_SIZE],
                                              bool useAsyncCopy,
+                                             bool usePaddedLayout,
                                              tt::PipeliningOption &options) {
   triton::AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(
       forOp->getParentOfType<ModuleOp>());
@@ -724,7 +732,8 @@ LogicalResult preprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
 }
 
 LogicalResult pipelineLoop(scf::ForOp forOp, int numStages, int globalPrefetch,
-                           int localPrefetch, bool useAsyncCopy) {
+                           int localPrefetch, bool useAsyncCopy,
+                           bool usePaddedLayout) {
 
   int lastStage = numStages - 1;
   int stages[SCHED_SIZE];
@@ -752,8 +761,8 @@ LogicalResult pipelineLoop(scf::ForOp forOp, int numStages, int globalPrefetch,
     }
   };
 
-  if (failed(preprocessLoopAndBuildSchedule(forOp, numStages, stages,
-                                            useAsyncCopy, options)))
+  if (failed(preprocessLoopAndBuildSchedule(
+          forOp, numStages, stages, useAsyncCopy, usePaddedLayout, options)))
     return failure();
   LDBG("Loop before sending to expander:\n" << *forOp);
 
@@ -833,7 +842,8 @@ struct PipelinePass : impl::TritonAMDGPUStreamPipelineBase<PipelinePass> {
         continue;
       }
       (void)pipelineLoop(forOp, tt::getNumStagesOrDefault(forOp, numStages),
-                         globalPrefetch, localPrefetch, useAsyncCopy);
+                         globalPrefetch, localPrefetch, useAsyncCopy,
+                         usePaddedSharedLayout);
     }
 
     if (useAsyncCopy) {
