@@ -29,6 +29,9 @@ def TritonAMDGPUStreamPipeline : Pass<"tritonamdgpu-stream-pipeline", "mlir::Mod
     Option<"usePingpong", "use_pingpong",
            "bool", /*default*/"false",
            "Use schedules to enable block ping-pong">,
+    Option<"usePaddedSharedLayout", "use_padded_shared_layout", "bool",
+            /*default*/ "false",
+            "Use padded shared layout for shared memory">,
   ];
 }
 
