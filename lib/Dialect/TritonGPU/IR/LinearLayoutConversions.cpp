@@ -1,5 +1,6 @@
 #include <vector>
 
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
@@ -1714,6 +1715,37 @@ LinearLayout getTmemLoadLayoutSplitLongM(int M, int N, RankedTensorType oldType,
                    {outDimNames[0], outDimNames[1]});
 
   return combineCtaCgaWithShape(regLanes, ctaLayout, oldType.getShape());
+}
+
+LinearLayout getRegToSharedLayout(RankedTensorType srcTy, MemDescType dstTy) {
+  auto *ctx = srcTy.getContext();
+
+  auto shape = srcTy.getShape();
+  LinearLayout srcLayout = toLinearLayout(srcTy);
+
+  auto outNames = to_vector(srcLayout.getOutDimNames());
+  auto order = to_vector(triton::gpu::getOrder(srcTy));
+  auto reorderdNames = applyPermutation(outNames, order);
+  srcLayout = srcLayout.transposeOuts(reorderdNames);
+
+  auto paddedLayout =
+      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(dstTy.getEncoding());
+  LinearLayout srcToSharedLayout = LinearLayout::empty();
+  if (paddedLayout) {
+    StringAttr kOffset = str_attr("offset");
+    srcToSharedLayout =
+        srcLayout.reshapeOuts({{kOffset, srcLayout.getTotalOutDimSize()}});
+    llvm::outs() << "Reg: " << srcLayout << "\nShared: " << srcToSharedLayout
+                 << "\n";
+  } else {
+    auto sharedLL = triton::gpu::toLinearLayout(dstTy);
+    llvm::outs() << "Reg: " << srcLayout << "\nShared: " << sharedLL << "\n";
+    srcToSharedLayout = srcLayout.invertAndCompose(sharedLL);
+    llvm::outs() << "Reg: " << srcLayout << "\nShared: " << sharedLL
+                 << "\nRegToShared: " << srcToSharedLayout << "\n";
+  }
+
+  return srcToSharedLayout;
 }
 
 } // namespace mlir::triton::gpu
