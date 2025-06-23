@@ -1833,14 +1833,14 @@ LinearLayout getRegToSharedLayout(RankedTensorType srcTy, MemDescType dstTy) {
     StringAttr kOffset = str_attr("offset");
     srcToSharedLayout =
         srcLayout.reshapeOuts({{kOffset, srcLayout.getTotalOutDimSize()}});
-    llvm::outs() << "Reg: " << srcLayout << "\nShared: " << srcToSharedLayout
-                 << "\n";
+    // llvm::outs() << "Reg: " << srcLayout << "\nShared: " << srcToSharedLayout
+    //              << "\n";
   } else {
     auto sharedLL = triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
-    llvm::outs() << "Reg: " << srcLayout << "\nShared: " << sharedLL << "\n";
+    // llvm::outs() << "Reg: " << srcLayout << "\nShared: " << sharedLL << "\n";
     srcToSharedLayout = srcLayout.invertAndCompose(sharedLL);
-    llvm::outs() << "Reg: " << srcLayout << "\nShared: " << sharedLL
-                 << "\nRegToShared: " << srcToSharedLayout << "\n";
+    // llvm::outs() << "Reg: " << srcLayout << "\nShared: " << sharedLL
+    //              << "\nRegToShared: " << srcToSharedLayout << "\n";
   }
 
   return srcToSharedLayout;
