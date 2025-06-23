@@ -256,9 +256,15 @@ getSharedEncIfAllUsersAreDotEnc(bool usePaddedLayout, Value loadedValue) {
       auto userResEnc = cast<ttg::TensorOrMemDesc>(userResType).getEncoding();
       if (auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(userResEnc)) {
         if (usePaddedLayout) {
+          unsigned innerD = ttg::getShapePerCTA(ctaLayout.getCTASplitNum(),
+                                                srcTy.getShape())[order[0]];
+          unsigned threadNumBytes =
+              std::max(dotOpEnc.getKWidth() * bitWidth / 8u, 1u);
+          threadNumBytes =
+              llvm::alignTo(threadNumBytes, 4); // Assume 32-bit per bank
           tempAttr = ttg::PaddedSharedEncodingAttr::get(
-              loadedValue.getContext(), srcTy.getShape(), sharedOrder,
-              dotOpEnc.getKWidth(), bitWidth, ctaLayout);
+              loadedValue.getContext(), {{innerD, threadNumBytes}}, sharedOrder,
+              ctaLayout);
         } else {
           tempAttr = ttg::SwizzledSharedEncodingAttr::get(
               loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
