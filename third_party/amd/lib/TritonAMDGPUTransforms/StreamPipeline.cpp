@@ -391,7 +391,7 @@ createStreamOps(const LoadToInfoMap &loadToInfo, scf::ForOp &forOp,
 
 LoadToInfoMap
 preprocessLoop(triton::AMD::ModuleAxisInfoAnalysis &axisInfoAnalysis,
-               scf::ForOp &forOp, int numStages) {
+               scf::ForOp &forOp, int numStages, bool usePadding) {
   auto arch = getAMDArch(forOp->getParentOfType<ModuleOp>());
   triton::AMD::ISAFamily isaFamily = triton::AMD::ISAFamily::Unknown;
   if (arch)
@@ -417,7 +417,8 @@ preprocessLoop(triton::AMD::ModuleAxisInfoAnalysis &axisInfoAnalysis,
   for (const auto &[load, info] : loadOpToIndLevel) {
     auto [distance, use] = info;
     auto sharedEncoding =
-        getSharedEncIfAllUsersAreDotEnc(load->getResult(0)).value_or(nullptr);
+        getSharedEncIfAllUsersAreDotEnc(usePadding, load->getResult(0))
+            .value_or(nullptr);
     loadToInfo[load] = {sharedEncoding, distance, use};
   }
 
@@ -998,12 +999,14 @@ buildSchedule(scf::ForOp &forOp, int numStages, const LoadToInfoMap &loadToInfo,
 
 FailureOr<scf::ForOp> pipelineLoop(scf::ForOp forOp, int numStages,
                                    int globalPrefetch, int localPrefetch,
-                                   bool useAsyncCopy, bool waitAtTail) {
+                                   bool useAsyncCopy, bool waitAtTail,
+                                   bool usePadding) {
 
   triton::AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(
       forOp->getParentOfType<ModuleOp>());
 
-  LoadToInfoMap loadToInfo = preprocessLoop(axisInfoAnalysis, forOp, numStages);
+  LoadToInfoMap loadToInfo =
+      preprocessLoop(axisInfoAnalysis, forOp, numStages, usePadding);
 
   if (loadToInfo.empty()) {
     LDBG("couldn't find any pipeline-able loads:\n" << *forOp);
@@ -1110,7 +1113,7 @@ struct PipelinePass : impl::TritonAMDGPUStreamPipelineBase<PipelinePass> {
       int numStagesThis = tt::getNumStagesOrDefault(forOp, numStages);
       bool waitAtTail = usePingpong && (numStagesThis == 3) && useAsyncCopy;
       (void)pipelineLoop(forOp, numStagesThis, globalPrefetch, localPrefetch,
-                         useAsyncCopy, waitAtTail);
+                         useAsyncCopy, waitAtTail, usePaddedSharedLayout);
     }
 
     // NOTE: Leave empty for now, until we utilize customEpiloguePeeling

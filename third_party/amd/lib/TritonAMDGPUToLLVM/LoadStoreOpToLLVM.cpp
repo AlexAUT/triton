@@ -356,8 +356,12 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
 
     VectorType vecTy;
     SmallVector<Value> warpStartAddrs;
+
+    auto regToShared = getRegToSharedLayout(srcTy, dstTy);
+
     bool ok = emitTransferBetweenRegistersAndShared(
-        regLayout, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+        regLayout, regToShared, dstTy, resElemTy, {}, smemObj, loc, rewriter,
+        targetInfo,
         /*laneId=*/b.i32_val(0), warpId,
         [&](VectorType vecTy_, Value shmemAddr) {
           vecTy = vecTy_;
