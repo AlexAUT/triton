@@ -256,8 +256,8 @@ getSharedEncIfAllUsersAreDotEnc(bool usePaddedLayout, Value loadedValue) {
       auto userResEnc = cast<ttg::TensorOrMemDesc>(userResType).getEncoding();
       if (auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(userResEnc)) {
         if (usePaddedLayout) {
-          unsigned innerD = ttg::getShapePerCTA(ctaLayout.getCTASplitNum(),
-                                                srcTy.getShape())[order[0]];
+          unsigned innerD = ttg::getShapePerCTA(
+              ctaLayout.getCTASplitNum(), srcTy.getShape())[sharedOrder[0]];
           unsigned threadNumBytes =
               std::max(dotOpEnc.getKWidth() * bitWidth / 8u, 1u);
           threadNumBytes =
