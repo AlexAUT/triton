@@ -245,11 +245,30 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     auto emitSharedAddresses = [&](MemDescType dstTy,
                                    SmallVector<Value> &shmemAddrs,
                                    VectorType &vecTy, bool forceLane0) {
+      auto regLayout =
+          triton::gpu::toLinearLayout(srcTy.getShape(), srcTy.getEncoding());
+      auto regToShared = getRegToSharedLayout(srcTy, dstTy);
       auto loc = op->getLoc();
       auto smemObj = mlir::LLVM::getSharedMemoryObjectFromStruct(
           loc, llDst, resElemTy, rewriter);
+
+      TritonLLVMOpBuilder b(loc, rewriter);
+      auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+      if (forceLane0) {
+        laneId = b.i32_val(0);
+        // NFC it's copied from getLaneAndWarpId but we add a shuffleIdx(0) to
+        // the tid so LLVM sees that warpId is a scalar This is not optimal as
+        // it adds a readlane which is not necessary but better than getting
+        // readfirstlanes for every direct-to-lds load
+        Value tid =
+            targetInfo.shuffleIdx(rewriter, loc, getThreadId(rewriter, loc), 0);
+        int threadsPerWarp = triton::gpu::lookupThreadsPerWarp(rewriter);
+        Value warpSizeVal = b.i32_val(threadsPerWarp);
+        warpId = b.udiv(tid, warpSizeVal);
+      }
       bool ok = emitTransferBetweenRegistersAndShared(
-          srcTy, dstTy, resElemTy, {}, smemObj, loc, rewriter, targetInfo,
+          regLayout, regToShared, dstTy, resElemTy, {}, smemObj, loc, rewriter,
+          targetInfo, laneId, warpId,
           [&](VectorType vecTy_, Value shmemAddr) {
             vecTy = vecTy_;
             shmemAddrs.push_back(shmemAddr);

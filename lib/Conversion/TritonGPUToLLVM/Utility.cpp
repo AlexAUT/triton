@@ -432,6 +432,90 @@ Value getSmemVecAddr(const LinearLayout &regLayout,
 } // namespace
 
 bool emitTransferBetweenRegistersAndShared(
+    LinearLayout &regLayout, LinearLayout &regToSharedLayout,
+    triton::gpu::MemDescType sharedTy, Type elemLlvmTy,
+    std::optional<int32_t> maxVecElems, const SharedMemoryObject &smemObj,
+    Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
+    Value laneId, Value warpId,
+    std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback,
+    bool forceLane0) {
+  MLIRContext *ctx = rewriter.getContext();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+  StringAttr kBlock = str_attr("block");
+  StringAttr kRegister = str_attr("register");
+  StringAttr kLane = str_attr("lane");
+  StringAttr kWarp = str_attr("warp");
+  StringAttr kOffset = str_attr("offset");
+
+  // TODO(jlebar): We don't currently support loading from shared memory in a
+  // different CTA.  We'd need to emit `mapa.shared::cluster` instructions.
+  for (int inBlock = 1; inBlock < regToSharedLayout.getInDimSize(kBlock);
+       inBlock *= 2) {
+    auto idx = regToSharedLayout.apply(
+        {{kRegister, 0}, {kLane, 0}, {kWarp, 0}, {kBlock, inBlock}});
+    // Intra-block offset must be 0
+    int32_t offset = idx[0].second;
+    if (offset != 0) {
+      return false;
+    }
+    // Check if there's any cross CTA load.
+    int32_t outBlock = idx[1].second;
+    if (outBlock != inBlock) {
+      return false;
+    }
+  }
+
+  // Determine how many consecutive registers map to consecutive shmem elements
+  // in out-dimension offsetN.  This is our load instruction's vector width.
+  //
+  // It's OK if the vector width we choose here is wider than the hardware
+  // supports; LLVM will legalize it.
+  int vecElems =
+      std::min({regToSharedLayout.getNumConsecutiveInOut(),
+                maxVecElems.value_or(std::numeric_limits<int>::max())});
+
+  auto paddedLayout =
+      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedTy.getEncoding());
+  if (paddedLayout) {
+    vecElems = std::min(vecElems, int(paddedLayout.getMinInterval()));
+  }
+
+  auto withCTAOffset = triton::gpu::getNumCTAs(sharedTy.getEncoding()) > 1;
+  Value blockId =
+      withCTAOffset ? target.getClusterCTAId(rewriter, loc) : b.i32_val(0);
+
+  // For kernels with a single CTA, `allocSharedLayout.sublayout(S("block"),
+  // outDims) == 0`. We need to take out the "block" dimension in order to use
+  // `invert`.
+  // For kernels with multiple CTAs per CGA,
+  // `allocSharedLayout.sublayout(S("block"), outDims) != 0`. We do not need to
+  // take out the "block" dimension.
+  // Thus we use `pseudoinvert` instead of `invert` here for simplicity.
+  auto allocShape = sharedTy.getAllocShape();
+  auto invertAllocSharedLayout = LinearLayout::empty();
+  if (!paddedLayout) {
+    // For now this is only needed for the cases where we have swizzling.
+    invertAllocSharedLayout =
+        triton::gpu::toLinearLayout(allocShape.take_back(sharedTy.getRank()),
+                                    sharedTy.getEncoding())
+            .pseudoinvert();
+  }
+
+  int numElems = regToSharedLayout.getInDimSize(kRegister);
+  auto vecTy = vec_ty(elemLlvmTy, vecElems);
+  SmallVector<Value> ret;
+  for (int i = 0; i < numElems / vecElems; i++) {
+    auto regId = b.i32_val(i * vecElems);
+    auto vecAddr = getSmemVecAddr(
+        regLayout, regToSharedLayout, invertAllocSharedLayout, smemObj,
+        sharedTy, elemLlvmTy, regId, laneId, warpId, blockId, loc, rewriter);
+    perVectorCallback(vecTy, vecAddr);
+  }
+  return true;
+}
+
+bool emitTransferBetweenRegistersAndShared(
     LinearLayout &regLayout, triton::gpu::MemDescType sharedTy, Type elemLlvmTy,
     std::optional<int32_t> maxVecElems, const SharedMemoryObject &smemObj,
     Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
