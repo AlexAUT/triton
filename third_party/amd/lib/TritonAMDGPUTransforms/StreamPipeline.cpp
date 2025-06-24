@@ -258,12 +258,15 @@ getSharedEncIfAllUsersAreDotEnc(bool usePaddedLayout, Value loadedValue) {
         if (usePaddedLayout) {
           unsigned innerD = ttg::getShapePerCTA(
               ctaLayout.getCTASplitNum(), srcTy.getShape())[sharedOrder[0]];
+          unsigned byteWidth = std::max(bitWidth / 8u, 1u);
           unsigned threadNumBytes =
-              std::max(dotOpEnc.getKWidth() * bitWidth / 8u, 1u);
+              std::max(dotOpEnc.getKWidth() * byteWidth, 1u);
           threadNumBytes =
-              llvm::alignTo(threadNumBytes, 4); // Assume 32-bit per bank
+              llvm::alignTo(threadNumBytes,
+                            std::max(4u, byteWidth)); // Assume 32-bit per bank
+          unsigned paddingInElems = threadNumBytes / byteWidth;
           tempAttr = ttg::PaddedSharedEncodingAttr::get(
-              loadedValue.getContext(), {{innerD, threadNumBytes}}, sharedOrder,
+              loadedValue.getContext(), {{innerD, paddingInElems}}, sharedOrder,
               ctaLayout);
         } else {
           tempAttr = ttg::SwizzledSharedEncodingAttr::get(
