@@ -34,7 +34,7 @@ namespace {
 int getNumberOfLoadInstructions(RankedTensorType srcTy,
                                 ttg::MemDescType dstTy) {
   LinearLayout srcToSharedLayout =
-      triton::gpu::getRegToSharedLayout(srcTy, dstTy);
+      triton::gpu::getRegToSharedLayoutForPadding(srcTy, dstTy);
 
   // On GFX9 we cannot split direct to lds loads into multiple ones because we
   // need coalesced writes. So we can divide the number of registers by the

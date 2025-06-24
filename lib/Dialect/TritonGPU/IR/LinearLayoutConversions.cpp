@@ -1717,14 +1717,15 @@ LinearLayout getTmemLoadLayoutSplitLongM(int M, int N, RankedTensorType oldType,
   return combineCtaCgaWithShape(regLanes, ctaLayout, oldType.getShape());
 }
 
-LinearLayout getRegToSharedLayout(RankedTensorType srcTy, MemDescType dstTy) {
+LinearLayout getRegToSharedLayoutForPadding(RankedTensorType srcTy,
+                                            MemDescType dstTy) {
   auto *ctx = srcTy.getContext();
 
   auto shape = srcTy.getShape();
   LinearLayout srcLayout = toLinearLayout(srcTy);
 
   auto outNames = to_vector(srcLayout.getOutDimNames());
-  auto order = to_vector(triton::gpu::getOrder(srcTy));
+  auto order = to_vector(triton::gpu::getOrder(dstTy));
   auto reorderdNames = applyPermutation(outNames, order);
   srcLayout = srcLayout.transposeOuts(reorderdNames);
 
