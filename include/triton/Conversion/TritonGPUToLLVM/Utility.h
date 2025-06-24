@@ -352,6 +352,11 @@ public:
   SmallVector<Value> getStrides(triton::gpu::MemDescType memDesc, Location loc,
                                 RewriterBase &rewriter) const;
 
+  Value getPaddingPerDim(unsigned dim, triton::gpu::MemDescType memDesc,
+                         Location loc, RewriterBase &rewriter) const;
+  SmallVector<Value> getPadding(triton::gpu::MemDescType memDesc, Location loc,
+                                RewriterBase &rewriter) const;
+
   // TODO(Keren): deprecate the method once AMD backend has cleaned up
   Value getCSwizzleOffset(int dim) const {
     assert(dim >= 0 && dim < offsets.size());
