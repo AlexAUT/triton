@@ -206,21 +206,21 @@ def get_cuda_autotune_config():
 
 def get_hip_autotune_config():
     return [
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+        #     num_warps=4, num_stages=2),
         triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2},
+            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2},
             num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
-            num_warps=8, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 3},
-            num_warps=4, num_stages=2),
-        triton.Config(
-            {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 8},
-            num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
+        #     num_warps=8, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 3},
+        #     num_warps=4, num_stages=2),
+        # triton.Config(
+        #     {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 8},
+        #     num_warps=4, num_stages=2),
     ]
 
 
@@ -286,6 +286,22 @@ def matmul_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+
+    tl.assume(M > 0)
+    tl.assume(N > 0)
+    tl.assume(K > 0)
+    tl.assume(stride_am > 0)
+    tl.assume(stride_ak > 0)
+    tl.assume(stride_bk > 0)
+    tl.assume(stride_bn > 0)
+    tl.assume(stride_cm > 0)
+    tl.assume(stride_cn > 0)
+    tl.assume(BLOCK_SIZE_M > 0)
+    tl.assume(BLOCK_SIZE_N > 0)
+    tl.assume(BLOCK_SIZE_K > 0)
+    tl.assume(GROUP_SIZE_M > 0)
+    tl.assume(pid_m > 0)
+    tl.assume(pid_n > 0)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -357,8 +373,10 @@ def matmul(a, b, activation=""):
 # We can test our custom matrix multiplication operation against a native torch implementation (i.e., cuBLAS).
 
 torch.manual_seed(0)
-a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
-b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
+# a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
+# b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
+a = torch.randn((32, 64), device=DEVICE, dtype=torch.float16)
+b = torch.randn((64, 32), device=DEVICE, dtype=torch.float16)
 triton_output = matmul(a, b)
 torch_output = torch.matmul(a, b)
 print(f"triton_output_with_fp16_inputs={triton_output}")
@@ -371,6 +389,7 @@ if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=rtol):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
+    print(f"Max diff: {torch.max((triton_output - torch_output).abs())}")
 
 TORCH_HAS_FP8 = hasattr(torch, "float8_e4m3fn") or hasattr(torch, "float8_e4m3fnuz")
 
@@ -449,4 +468,4 @@ def benchmark(M, N, K, provider, fp8_inputs):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-benchmark.run(show_plots=True, print_data=True)
+# benchmark.run(show_plots=True, print_data=True)

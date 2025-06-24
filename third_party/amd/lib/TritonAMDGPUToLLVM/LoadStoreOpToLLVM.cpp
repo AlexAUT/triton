@@ -173,7 +173,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     }
     // Compute the blocked -> shared linear layout to check preconditions
     LinearLayout srcToSharedLayout =
-        triton::gpu::getRegToSharedLayout(srcTy, dstTy);
+        triton::gpu::getRegToSharedLayoutForPadding(srcTy, dstTy);
 
     unsigned threadsPerWarp = lookupThreadsPerWarp(rewriter);
     if (!hasSwizzling && !LLVM::AMD::canCoalesceWriteIntoSharedMemory(
@@ -247,7 +247,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
                                    VectorType &vecTy, bool forceLane0) {
       auto regLayout =
           triton::gpu::toLinearLayout(srcTy.getShape(), srcTy.getEncoding());
-      auto regToShared = getRegToSharedLayout(srcTy, dstTy);
+      auto regToShared = getRegToSharedLayoutForPadding(srcTy, dstTy);
       auto loc = op->getLoc();
       auto smemObj = mlir::LLVM::getSharedMemoryObjectFromStruct(
           loc, llDst, resElemTy, rewriter);
