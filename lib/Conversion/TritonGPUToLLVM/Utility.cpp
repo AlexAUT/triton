@@ -898,9 +898,10 @@ bool emitTransferBetweenRegistersAndShared(
   auto regLayout = triton::gpu::toLinearLayout(registerTy.getShape(),
                                                registerTy.getEncoding());
   auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+  auto regToSharedLayout = getRegToSharedLayoutForPadding(registerTy, sharedTy);
   return emitTransferBetweenRegistersAndShared(
-      regLayout, sharedTy, elemLlvmTy, maxVecElems, smemObj, loc, rewriter,
-      target, laneId, warpId, perVectorCallback);
+      regLayout, regToSharedLayout, sharedTy, elemLlvmTy, maxVecElems, smemObj,
+      loc, rewriter, target, laneId, warpId, perVectorCallback);
 }
 
 SmallVector<Value> loadSharedToDistributed(triton::gpu::LocalLoadOp localLoadOp,
