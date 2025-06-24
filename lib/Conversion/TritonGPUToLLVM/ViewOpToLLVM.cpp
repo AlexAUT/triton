@@ -446,11 +446,42 @@ struct MemDescSubviewOpConversion
       offsetVals.push_back(b.add(opOffsetVals[i], smemObj.getOffsets()[i]));
     }
 
+    // For padded layouts we compute a flat offset for the reduced dimensions
+    SmallVector<Value> padding = smemObj.getPadding(srcTy, loc, rewriter);
+
     Value offset;
     if (rankReduced || (destTy.getRank() == 1 && destTy.getDimSize(0) == 1)) {
       // We are splitting the pipelining dimension which may not be a power of 2
       // so we can't use LinearLayouts
       offset = dot(rewriter, loc, opOffsetVals, opSmemStrides);
+      auto printValue = [&](std::string prefix, ValueRange values) {
+        auto prefixAttr = StringAttr::get(ctx, prefix);
+        auto hexAttr = BoolAttr::get(ctx, false);
+        SmallVector<int32_t> isSigned(values.size(), true);
+        auto isSignedAttr = DenseI32ArrayAttr::get(ctx, isSigned);
+        auto tId = getThreadId(rewriter, loc);
+        Value pred = b.icmp_eq(tId, b.i32_val(0));
+        // Value pred2 = b.icmp_eq(regId, b.i32_val(0));
+        // pred = b.and_(pred, pred2);
+        Block *currentBlock = rewriter.getInsertionBlock();
+        Block *afterLoad =
+            rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+        Block *loadBlock = rewriter.createBlock(afterLoad);
+        rewriter.setInsertionPointToEnd(currentBlock);
+        rewriter.create<LLVM::CondBrOp>(loc, pred, loadBlock, afterLoad);
+        rewriter.setInsertionPointToStart(loadBlock);
+
+        rewriter.create<triton::PrintOp>(loc, prefixAttr, hexAttr, values,
+                                         isSignedAttr);
+
+        rewriter.create<LLVM::BrOp>(loc, afterLoad);
+        rewriter.setInsertionPointToStart(afterLoad);
+      };
+      auto padPerDim = smemObj.getPaddingPerDim(0, srcTy, loc, rewriter);
+      auto padding = b.mul(padPerDim, opOffsetVals[0]);
+      offset = b.add(offset, padding);
+      // printValue("Padding: ", ValueRange{padding});
+      // printValue("Offset: ", ValueRange{offset});
     } else {
       auto dimNames = standardOutDimNames(ctx, opOffsetVals.size());
       SmallVector<std::pair<StringAttr, Value>> logicalOffsets;

@@ -366,6 +366,29 @@ Value getSmemVecAddr(const LinearLayout &regLayout,
       smemOffset = dot(rewriter, loc, smemOffsets,
                        applyPermutation(smemStrides, smemOrder));
     }
+    auto printValue = [&](std::string prefix, ValueRange values) {
+      auto prefixAttr = StringAttr::get(ctx, prefix);
+      auto hexAttr = BoolAttr::get(ctx, false);
+      SmallVector<int32_t> isSigned(values.size(), true);
+      auto isSignedAttr = DenseI32ArrayAttr::get(ctx, isSigned);
+      auto tId = getThreadId(rewriter, loc);
+      Value pred = b.icmp_eq(tId, b.i32_val(0));
+      Value pred2 = b.icmp_eq(regId, b.i32_val(0));
+      pred = b.and_(pred, pred2);
+      Block *currentBlock = rewriter.getInsertionBlock();
+      Block *afterLoad =
+          rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+      Block *loadBlock = rewriter.createBlock(afterLoad);
+      rewriter.setInsertionPointToEnd(currentBlock);
+      rewriter.create<LLVM::CondBrOp>(loc, pred, loadBlock, afterLoad);
+      rewriter.setInsertionPointToStart(loadBlock);
+
+      rewriter.create<triton::PrintOp>(loc, prefixAttr, hexAttr, values,
+                                       isSignedAttr);
+
+      rewriter.create<LLVM::BrOp>(loc, afterLoad);
+      rewriter.setInsertionPointToStart(afterLoad);
+    };
     if (auto paddedLayout =
             dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedEnc)) {
       // Apply the offset needed for padding.
@@ -376,6 +399,10 @@ Value getSmemVecAddr(const LinearLayout &regLayout,
         Value pVal = b.i32_val(llvm::Log2_32(padding));
         padOffset = b.add(padOffset, b.shl(b.ashr(smemOffset, iVal), pVal));
       }
+      // printValue("RegId: ", ValueRange{regId});
+      // printValue("PadOffset: ", ValueRange{padOffset});
+      // printValue("SmemOffset: ", ValueRange{smemOffset});
+      // printValue("Base: ", ValueRange(smemBase));
       smemOffset = b.add(smemOffset, padOffset);
     }
   } else { // Case 2 -> rank-reduced swizzling
@@ -426,6 +453,31 @@ Value getSmemVecAddr(const LinearLayout &regLayout,
   auto ptrTy = smemBase.getType();
   auto vecAddr = b.gep(ptrTy, elemLlvmTy, smemBase, smemOffset,
                        LLVM::GEPNoWrapFlags::inbounds);
+
+  auto printValue = [&](std::string prefix, ValueRange values) {
+    auto prefixAttr = StringAttr::get(ctx, prefix);
+    auto hexAttr = BoolAttr::get(ctx, false);
+    SmallVector<int32_t> isSigned(values.size(), true);
+    auto isSignedAttr = DenseI32ArrayAttr::get(ctx, isSigned);
+    auto tId = getThreadId(rewriter, loc);
+    Value pred = b.icmp_eq(tId, b.i32_val(0));
+    Value pred2 = b.icmp_eq(regId, b.i32_val(0));
+    pred = b.and_(pred, pred2);
+    Block *currentBlock = rewriter.getInsertionBlock();
+    Block *afterLoad =
+        rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+    Block *loadBlock = rewriter.createBlock(afterLoad);
+    rewriter.setInsertionPointToEnd(currentBlock);
+    rewriter.create<LLVM::CondBrOp>(loc, pred, loadBlock, afterLoad);
+    rewriter.setInsertionPointToStart(loadBlock);
+
+    rewriter.create<triton::PrintOp>(loc, prefixAttr, hexAttr, values,
+                                     isSignedAttr);
+
+    rewriter.create<LLVM::BrOp>(loc, afterLoad);
+    rewriter.setInsertionPointToStart(afterLoad);
+  };
+  // printValue("Addr: ", ValueRange(vecAddr));
   return vecAddr;
 }
 
@@ -447,6 +499,19 @@ bool emitTransferBetweenRegistersAndShared(
   StringAttr kLane = str_attr("lane");
   StringAttr kWarp = str_attr("warp");
   StringAttr kOffset = str_attr("offset");
+
+  auto shape = sharedTy.getShape();
+  auto paddedLayout =
+      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedTy.getEncoding());
+  // LinearLayout regToSharedLayout = LinearLayout::empty();
+  // if (paddedLayout) {
+  //   regToSharedLayout =
+  //       regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
+  // } else {
+  //   auto sharedLL = triton::gpu::toLinearLayout(shape,
+  //   sharedTy.getEncoding()); regToSharedLayout =
+  //   regLayout.invertAndCompose(sharedLL);
+  // }
 
   // TODO(jlebar): We don't currently support loading from shared memory in a
   // different CTA.  We'd need to emit `mapa.shared::cluster` instructions.
@@ -474,9 +539,6 @@ bool emitTransferBetweenRegistersAndShared(
   int vecElems =
       std::min({regToSharedLayout.getNumConsecutiveInOut(),
                 maxVecElems.value_or(std::numeric_limits<int>::max())});
-
-  auto paddedLayout =
-      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedTy.getEncoding());
   if (paddedLayout) {
     vecElems = std::min(vecElems, int(paddedLayout.getMinInterval()));
   }
@@ -1013,6 +1075,90 @@ SharedMemoryObject::getStrides(triton::gpu::MemDescType memDesc, Location loc,
       allocShapePerCTA, layoutOrder, loc, rewriter);
   return SmallVector<Value>(allocStrides.end() - offsets.size(),
                             allocStrides.end());
+}
+
+Value SharedMemoryObject::getPaddingPerDim(unsigned targetDim,
+                                           triton::gpu::MemDescType memDesc,
+                                           Location loc,
+                                           RewriterBase &rewriter) const {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto paddedLayout =
+      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(memDesc.getEncoding());
+  if (!paddedLayout)
+    return b.i32_val(0);
+
+  auto allocShape = memDesc.getAllocShape();
+  auto rank = memDesc.getRank();
+  auto allocShapePerCTA =
+      triton::gpu::getAllocationShapePerCTA(memDesc.getEncoding(), allocShape);
+
+  auto layoutOrder = triton::gpu::getOrder(memDesc);
+  auto order =
+      SharedMemoryObject::getOrderForShape(allocShapePerCTA, layoutOrder);
+
+  if (targetDim == order[0])
+    return b.i32_val(0);
+
+  int64_t offset = 1;
+  for (auto dim : order) {
+    if (dim == targetDim)
+      break;
+
+    offset *= allocShapePerCTA[dim];
+  }
+  // Apply the offset needed for padding.
+  Value padOffset = b.i32_val(0);
+  for (auto [interval, padding] : llvm::zip_equal(paddedLayout.getIntervals(),
+                                                  paddedLayout.getPaddings())) {
+    Value iVal = b.i32_val(llvm::Log2_32(interval));
+    Value pVal = b.i32_val(llvm::Log2_32(padding));
+    padOffset = b.add(padOffset, b.shl(b.ashr(b.i32_val(offset), iVal), pVal));
+  }
+  return padOffset;
+}
+
+SmallVector<Value>
+SharedMemoryObject::getPadding(triton::gpu::MemDescType memDesc, Location loc,
+                               RewriterBase &rewriter) const {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto allocShape = memDesc.getAllocShape();
+  auto rank = memDesc.getRank();
+  SmallVector<Value> padding(rank, b.i32_val(0));
+  auto allocShapePerCTA =
+      triton::gpu::getAllocationShapePerCTA(memDesc.getEncoding(), allocShape);
+
+  auto paddedLayout =
+      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(memDesc.getEncoding());
+  if (!paddedLayout)
+    return padding;
+
+  auto layoutOrder = triton::gpu::getOrder(memDesc);
+  auto order =
+      SharedMemoryObject::getOrderForShape(allocShapePerCTA, layoutOrder);
+
+  auto elemByteWidth = memDesc.getElementTypeBitWidth() / 8;
+
+  int64_t linearElemOffset = 1;
+  for (int o = 1; o < rank; o++) {
+    auto prevDim = order[o - 1];
+    auto dim = order[o];
+    linearElemOffset *= allocShapePerCTA[prevDim];
+    auto linearByteOffset = linearElemOffset * elemByteWidth;
+    assert(llvm::isPowerOf2_32(linearByteOffset));
+
+    // Apply the offset needed for padding.
+    Value padOffset = b.i32_val(0);
+    for (auto [interval, padding] : llvm::zip_equal(
+             paddedLayout.getIntervals(), paddedLayout.getPaddings())) {
+      Value iVal = b.i32_val(llvm::Log2_32(interval));
+      Value pVal = b.i32_val(llvm::Log2_32(padding));
+      padOffset = b.add(padOffset,
+                        b.shl(b.ashr(b.i32_val(linearElemOffset), iVal), pVal));
+    }
+
+    padding[dim] = padOffset;
+  }
+  return padding;
 }
 
 Value SharedMemoryObject::getBaseBeforeSlice(int dim, Location loc,
