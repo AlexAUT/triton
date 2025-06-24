@@ -264,6 +264,8 @@ getSharedEncIfAllUsersAreDotEnc(bool usePaddedLayout, Value loadedValue) {
           threadNumBytes =
               llvm::alignTo(threadNumBytes,
                             std::max(4u, byteWidth)); // Assume 32-bit per bank
+          // We also need to align with dwordx4 or dword loads
+          innerD = llvm::alignTo(innerD, 16 * 64);
           unsigned paddingInElems = threadNumBytes / byteWidth;
           tempAttr = ttg::PaddedSharedEncodingAttr::get(
               loadedValue.getContext(), {{innerD, paddingInElems}}, sharedOrder,
