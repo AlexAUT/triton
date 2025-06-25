@@ -297,7 +297,7 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
 std::optional<LinearLayout> chooseMfmaLikeStoreLayout(RankedTensorType valType);
 
 // Computes the LL going from register to shared memory offsets
-LinearLayout getRegToSharedLayoutForPadding(RankedTensorType srcTy,
+LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
                                             MemDescType dstTy);
 
 } // namespace mlir::triton::gpu
