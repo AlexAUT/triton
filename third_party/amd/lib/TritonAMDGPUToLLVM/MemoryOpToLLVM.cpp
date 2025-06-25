@@ -61,14 +61,14 @@ private:
       return false;
     }
 
-    auto sharedEnc =
-        dyn_cast<triton::gpu::SwizzledSharedEncodingAttr>(srcTy.getEncoding());
-    if (!sharedEnc)
+    if (!isa<triton::gpu::SwizzledSharedEncodingAttr,
+             triton::gpu::PaddedSharedEncodingAttr>(srcTy.getEncoding()))
       return false;
 
     int rank = dstTy.getRank();
     const int kDim = dotEnc.getOpIdx() == 0 ? rank - 1 : rank - 2;
-    return kDim != sharedEnc.getOrder()[0];
+    auto order = triton::gpu::getOrder(srcTy);
+    return kDim != order[0];
   }
 
   bool checkKWidth(MemDescType srcTy, RankedTensorType dstTy) const {

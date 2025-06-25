@@ -136,7 +136,7 @@ LinearLayout nvidiaMmaTile(MLIRContext *ctx, ArrayRef<unsigned> tileShape,
 std::optional<LinearLayout> chooseMfmaLikeStoreLayout(RankedTensorType valType);
 
 // Computes the LL going from register to shared memory offsets
-LinearLayout getRegToSharedLayoutForPadding(RankedTensorType srcTy,
+LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
                                             MemDescType dstTy);
 
 } // namespace mlir::triton::gpu

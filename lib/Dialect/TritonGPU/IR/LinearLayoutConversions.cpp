@@ -1717,17 +1717,14 @@ LinearLayout getTmemLoadLayoutSplitLongM(int M, int N, RankedTensorType oldType,
   return combineCtaCgaWithShape(regLanes, ctaLayout, oldType.getShape());
 }
 
-LinearLayout getRegToSharedLayoutForPadding(RankedTensorType srcTy,
+LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
                                             MemDescType dstTy) {
-  auto *ctx = srcTy.getContext();
+  auto *ctx = dstTy.getContext();
 
-  auto shape = srcTy.getShape();
-  LinearLayout srcLayout = toLinearLayout(srcTy);
-
-  auto outNames = to_vector(srcLayout.getOutDimNames());
+  auto outNames = to_vector(regLayout.getOutDimNames());
   auto order = to_vector(triton::gpu::getOrder(dstTy));
   auto reorderdNames = applyPermutation(outNames, order);
-  srcLayout = srcLayout.transposeOuts(reorderdNames);
+  regLayout = regLayout.transposeOuts(reorderdNames);
 
   auto paddedLayout =
       dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(dstTy.getEncoding());
@@ -1735,13 +1732,13 @@ LinearLayout getRegToSharedLayoutForPadding(RankedTensorType srcTy,
   if (paddedLayout) {
     StringAttr kOffset = str_attr("offset");
     srcToSharedLayout =
-        srcLayout.reshapeOuts({{kOffset, srcLayout.getTotalOutDimSize()}});
+        regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
     // llvm::outs() << "Reg: " << srcLayout << "\nShared: " << srcToSharedLayout
     //              << "\n";
   } else {
     auto sharedLL = triton::gpu::toLinearLayout(dstTy);
     // llvm::outs() << "Reg: " << srcLayout << "\nShared: " << sharedLL << "\n";
-    srcToSharedLayout = srcLayout.invertAndCompose(sharedLL);
+    srcToSharedLayout = regLayout.invertAndCompose(sharedLL);
     // llvm::outs() << "Reg: " << srcLayout << "\nShared: " << sharedLL
     //              << "\nRegToShared: " << srcToSharedLayout << "\n";
   }

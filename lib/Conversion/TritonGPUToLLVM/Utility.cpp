@@ -787,14 +787,8 @@ bool emitTransferBetweenRegistersAndShared(
   auto shape = sharedTy.getShape();
   auto paddedLayout =
       dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedTy.getEncoding());
-  LinearLayout regToSharedLayout = LinearLayout::empty();
-  if (paddedLayout) {
-    regToSharedLayout =
-        regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
-  } else {
-    auto sharedLL = triton::gpu::toLinearLayout(sharedTy);
-    regToSharedLayout = regLayout.invertAndCompose(sharedLL);
-  }
+  LinearLayout regToSharedLayout =
+      getRegToSharedLayoutForPadding(regLayout, sharedTy);
 
   // TODO(jlebar): We don't currently support loading from shared memory in a
   // different CTA.  We'd need to emit `mapa.shared::cluster` instructions.
@@ -868,7 +862,7 @@ bool emitTransferBetweenRegistersAndShared(
     std::function<void(VectorType, Value /*shmemAddr*/)> perVectorCallback) {
   auto regLayout = triton::gpu::toLinearLayout(registerTy);
   auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
-  auto regToSharedLayout = getRegToSharedLayoutForPadding(registerTy, sharedTy);
+  auto regToSharedLayout = getRegToSharedLayoutForPadding(regLayout, sharedTy);
   return emitTransferBetweenRegistersAndShared(
       regLayout, regToSharedLayout, sharedTy, elemLlvmTy, maxVecElems, smemObj,
       loc, rewriter, target, laneId, warpId, perVectorCallback);
