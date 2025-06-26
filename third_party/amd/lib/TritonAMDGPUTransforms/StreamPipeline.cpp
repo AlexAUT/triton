@@ -166,7 +166,7 @@ initSchedule(int maxDist, int stages[SCHED_SIZE], int numStages,
   // If we use AsyncCopy we need one more buffer since we are not using a
   // register buffer
   if (useAsyncCopy) {
-    numBuffers += 1;
+    // numBuffers += 1;
   }
 
   LDBG("deduced max shared memory buffer number = " << numBuffers);
@@ -464,7 +464,7 @@ getSharedEncIfAllUsersAreDotEnc(bool usePaddedLayout, Value loadedValue) {
               llvm::alignTo(threadNumBytes,
                             std::max(4u, byteWidth)); // Assume 32-bit per bank
           // We also need to align with dwordx4 or dword loads
-          innerD = llvm::alignTo(innerD, 16 * 64);
+          innerD = llvm::alignTo(innerD, (16 * 64) / byteWidth);
           unsigned paddingInElems = threadNumBytes / byteWidth;
           tempAttr = ttg::PaddedSharedEncodingAttr::get(
               loadedValue.getContext(), {{innerD, paddingInElems}}, sharedOrder,
