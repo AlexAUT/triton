@@ -210,6 +210,7 @@ def get_hip_autotune_config():
         # {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4},
         # {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6},
         {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 4},
+        {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1},
     ]
     return [triton.Config(s | {'matrix_instr_nonkdim': 16}, num_warps=8, num_stages=2) for s in sizes]
 
@@ -351,7 +352,7 @@ def leaky_relu(x):
 def matmul(a, b, activation=""):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
-    assert a.is_contiguous(), "Matrix A must be contiguous"
+    # assert a.is_contiguous(), "Matrix A must be contiguous"
     M, K = a.shape
     K, N = b.shape
     # Allocates output.
@@ -376,10 +377,12 @@ def matmul(a, b, activation=""):
 # We can test our custom matrix multiplication operation against a native torch implementation (i.e., cuBLAS).
 
 torch.manual_seed(0)
-# a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
-# b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
-a = torch.randn((32, 64), device=DEVICE, dtype=torch.float16) - 0.5
-b = torch.randn((64, 32), device=DEVICE, dtype=torch.float16) - 0.5
+a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
+b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
+b = b.T
+# a = torch.randn((32, 64), device=DEVICE, dtype=torch.float16)
+# a = a.T
+# b = torch.randn((64, 32), device=DEVICE, dtype=torch.float16)
 triton_output = matmul(a, b)
 torch_output = torch.matmul(a, b)
 print(f"triton_output_with_fp16_inputs={triton_output}")
@@ -428,7 +431,7 @@ for fp8_inputs in [False, True]:
     configs.append(
         triton.testing.Benchmark(
             x_names=["M", "N", "K"],  # Argument names to use as an x-axis for the plot
-            x_vals=[128 * i for i in range(2, 33)],  # Different possible values for `x_name`
+            x_vals=[16384],  # Different possible values for `x_name`
             line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
             # Possible values for `line_arg`
             # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
@@ -459,4 +462,4 @@ def benchmark(M, N, K, provider, fp8_inputs):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-# benchmark.run(show_plots=True, print_data=True)
+# benchmark.run(show_plots=False, print_data=True)

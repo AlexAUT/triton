@@ -33,8 +33,7 @@ namespace {
 // memory.
 int getNumberOfLoadInstructions(RankedTensorType srcTy,
                                 ttg::MemDescType dstTy) {
-  auto regLayout =
-      triton::gpu::toLinearLayout(srcTy.getShape(), srcTy.getEncoding());
+  auto regLayout = triton::gpu::toLinearLayout(srcTy);
   LinearLayout srcToSharedLayout =
       triton::gpu::getRegToSharedLayoutForPadding(regLayout, dstTy);
 
