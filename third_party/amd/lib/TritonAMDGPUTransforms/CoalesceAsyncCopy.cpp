@@ -3,6 +3,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
 
 #define GEN_PASS_CLASSES
 #include "TritonAMDGPUTransforms/Passes.h"
@@ -43,6 +44,71 @@ struct CoalesceAsyncCopyWrites
     if (!blockedEnc)
       return rewriter.notifyMatchFailure(copyOp,
                                          "src encoding must be #blocked");
+
+    auto blockedLL = triton::gpu::toLinearLayout(srcTy.getShape(), blockedEnc);
+
+    MLIRContext *ctx = getContext();
+    auto order = blockedEnc.getOrder();
+    llvm::outs() << "Order: " << order[0] << ", " << order[1] << "\n";
+    llvm::outs() << "RegBlocked:\n" << blockedLL << "\n";
+    // LinearLayout reg = triton::identityStandardND(
+    //     str_attr("register"), blockedEnc.getSizePerThread(), order);
+    // llvm::outs() << "Reg:\n" << reg << "\n";
+    auto standardOutDims = standardOutDimNames(ctx, srcTy.getRank());
+    StringAttr kRegister = StringAttr::get(ctx, "register");
+    StringAttr kLane = StringAttr::get(ctx, "lane");
+    StringAttr kWarp = StringAttr::get(ctx, "warp");
+    StringAttr kBlock = StringAttr::get(ctx, "block");
+
+    std::vector<std::vector<int>> regBases = {{1, 0}, {2, 0}, {4, 0},
+                                              {0, 1}, {0, 2}, {0, 4}};
+    std::vector<std::vector<int>> laneBases = {{8, 0},  {16, 0}, {32, 0},
+                                               {64, 0}, {0, 16}, {0, 32}};
+    std::vector<std::vector<int>> warpBases = {{0, 8}, {0, 64}, {0, 128}};
+
+    auto transposeBases = [](std::vector<std::vector<int>> &vec) {
+      for (auto &p : vec)
+        std::swap(p[0], p[1]);
+    };
+
+    if (order[0] != 0) {
+      transposeBases(regBases);
+      transposeBases(laneBases);
+      transposeBases(warpBases);
+    }
+
+    LinearLayout paddedLayout({{kRegister, regBases},
+                               {kLane, laneBases},
+                               {kWarp, warpBases},
+                               {kBlock, {}}},
+                              {standardOutDims[0], standardOutDims[1]});
+
+    auto llEnc = ttg::LinearEncodingAttr::get(ctx, paddedLayout);
+    llvm::outs() << "Padding layout: " << paddedLayout << "\n";
+    llvm::outs() << "Encoding: " << llEnc << "\n";
+
+    auto loc = copyOp->getLoc();
+    // Convert layout of src, mask and other to new encoding
+    auto convertLayout = [&rewriter](auto loc, Value old, auto newEnc) {
+      auto oldTy = cast<RankedTensorType>(old.getType());
+      RankedTensorType newSrcTy = RankedTensorType::get(
+          oldTy.getShape(), oldTy.getElementType(), newEnc);
+      return rewriter.create<ttg::ConvertLayoutOp>(loc, newSrcTy, old);
+    };
+    auto cvtLL = convertLayout(loc, src, llEnc);
+    if (mask)
+      mask = convertLayout(loc, mask, llEnc);
+    if (other)
+      other = convertLayout(loc, other, llEnc);
+
+    rewriter.modifyOpInPlace(copyOp, [&]() {
+      copyOp.getSrcMutable().assign(cvtLL);
+      if (mask)
+        copyOp.getMaskMutable().assign(mask);
+      if (other)
+        copyOp.getOtherMutable().assign(other);
+    });
+    return success();
 
     auto sharedEnc =
         dyn_cast<ttg::SwizzledSharedEncodingAttr>(dstTy.getEncoding());
@@ -105,15 +171,6 @@ struct CoalesceAsyncCopyWrites
         blockedEnc.getOrder(), numWarps, threadsPerWarp,
         blockedEnc.getCTALayout());
 
-    // Convert layout of src, mask and other to new encoding
-    auto convertLayout = [&rewriter](auto loc, Value old, auto newEnc) {
-      auto oldTy = cast<RankedTensorType>(old.getType());
-      RankedTensorType newSrcTy = RankedTensorType::get(
-          oldTy.getShape(), oldTy.getElementType(), newEnc);
-      return rewriter.create<ttg::ConvertLayoutOp>(loc, newSrcTy, old);
-    };
-
-    auto loc = copyOp->getLoc();
     Value cvtSrc = convertLayout(loc, src, newBlockEnc);
 
     if (mask)
