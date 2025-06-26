@@ -1730,14 +1730,63 @@ LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
       dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(dstTy.getEncoding());
   LinearLayout srcToSharedLayout = LinearLayout::empty();
   if (paddedLayout) {
+    // We hack the LL of variant2
+
     StringAttr kOffset = str_attr("offset");
-    srcToSharedLayout =
-        regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
+
+    StringAttr kRegister = StringAttr::get(ctx, "register");
+    StringAttr kLane = StringAttr::get(ctx, "lane");
+    StringAttr kWarp = StringAttr::get(ctx, "warp");
+    StringAttr kBlock = StringAttr::get(ctx, "block");
+
+    auto standardOutDims = standardOutDimNames(ctx, dstTy.getRank());
+    // clang-format off
+    std::vector<std::vector<int>> offsetBases = {
+       {1, 0},
+       {2, 0},
+       {4, 0},
+       {8, 0},
+       {16, 0},
+       {32, 0},
+       {64, 0},
+       {0, 16},
+       {0, 32},
+       {0, 1},
+       {0, 2},
+       {0, 4},
+       {0, 8},
+       {0, 64},
+       {0, 128},
+    };
+    // clang-format on
+
+    auto transposeBases = [](std::vector<std::vector<int>> &vec) {
+      for (auto &p : vec)
+        std::swap(p[0], p[1]);
+    };
+
+    if (triton::gpu::getOrder(dstTy)[0] != 0) {
+      transposeBases(offsetBases);
+    }
+
+    LinearLayout rowSwizzled(
+        {
+            {kOffset, offsetBases},
+        },
+        {standardOutDims[0], standardOutDims[1]});
+
+    llvm::outs() << "Src: " << regLayout << "\n";
+    llvm::outs() << "Row swizzled: " << rowSwizzled << "\n";
+    srcToSharedLayout = regLayout.invertAndCompose(rowSwizzled);
+
+    // srcToSharedLayout =
+    //     regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
     // llvm::outs() << "Reg: " << srcLayout << "\nShared: " << srcToSharedLayout
     //              << "\n";
   } else {
+    auto shape = dstTy.getShape();
     auto sharedLL = triton::gpu::toLinearLayout(dstTy);
-    // llvm::outs() << "Reg: " << srcLayout << "\nShared: " << sharedLL << "\n";
+    llvm::outs() << "Shared: " << sharedLL << "\n";
     srcToSharedLayout = regLayout.invertAndCompose(sharedLL);
     // llvm::outs() << "Reg: " << srcLayout << "\nShared: " << sharedLL
     //              << "\nRegToShared: " << srcToSharedLayout << "\n";
