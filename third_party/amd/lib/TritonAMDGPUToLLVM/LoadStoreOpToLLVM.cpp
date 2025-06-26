@@ -668,6 +668,8 @@ struct BufferLoadToLocalOpConversion
       }
     }
 
+    // rewriter.create<ROCDL::SBarrierOp>(loc);
+
     // Drop the result token.
     Value zero = rewriter.create<LLVM::ConstantOp>(
         op.getLoc(), IntegerType::get(op.getContext(), 32),
