@@ -295,8 +295,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
       return failure();
     }
     // Compute the blocked -> shared linear layout to check preconditions
-    auto regLayout =
-        triton::gpu::toLinearLayout(srcTy.getShape(), srcTy.getEncoding());
+    auto regLayout = triton::gpu::toLinearLayout(srcTy);
     LinearLayout srcToSharedLayout =
         triton::gpu::getRegToSharedLayoutForPadding(regLayout, dstTy);
 
