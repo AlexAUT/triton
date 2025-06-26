@@ -791,7 +791,8 @@ struct AsyncCopyGlobalToLocalOpConversion
       return rewriter.notifyMatchFailure(op, "only supports 2d tensors");
 
     auto dstTy = op.getResult().getType();
-    auto sharedEnc = cast<SwizzledSharedEncodingAttr>(dstTy.getEncoding());
+    auto paddedEnc = dyn_cast<PaddedSharedEncodingAttr>(dstTy.getEncoding());
+    auto sharedEnc = dyn_cast<SwizzledSharedEncodingAttr>(dstTy.getEncoding());
     auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
 
     Value llSrc = adaptor.getSrc();
@@ -808,7 +809,7 @@ struct AsyncCopyGlobalToLocalOpConversion
     auto maskElements = getMaskElemsAndUpdateVeclen(
         rewriter, loc, adaptor.getMask(), op.getMask(), maxVec);
 
-    bool hasSwizzling = sharedEnc.getMaxPhase() != 1;
+    bool hasSwizzling = !paddedEnc && sharedEnc.getMaxPhase() != 1;
     if (failed(canWriteCoalesced(rewriter, op, srcTy, dstTy, maxVec,
                                  hasSwizzling))) {
       return failure();
