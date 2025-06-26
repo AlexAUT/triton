@@ -377,10 +377,10 @@ def matmul(a, b, activation=""):
 # We can test our custom matrix multiplication operation against a native torch implementation (i.e., cuBLAS).
 
 torch.manual_seed(0)
-# a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
-# b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
-a = torch.randn((32, 64), device=DEVICE, dtype=torch.float16) - 0.5
-b = torch.randn((32, 64), device=DEVICE, dtype=torch.float16) - 0.5
+a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
+b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
+# a = torch.randn((32, 64), device=DEVICE, dtype=torch.float16)
+# b = torch.randn((32, 64), device=DEVICE, dtype=torch.float16)
 b = b.T
 # a = a.T
 triton_output = matmul(a, b)
@@ -449,6 +449,7 @@ for fp8_inputs in [False, True]:
 def benchmark(M, N, K, provider, fp8_inputs):
     a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
     b = torch.randn((K, N), device=DEVICE, dtype=torch.float16)
+    b = b.T
     if TORCH_HAS_FP8 and fp8_inputs:
         a = a.to(torch.float8_e5m2)
         b = b.T
@@ -462,4 +463,4 @@ def benchmark(M, N, K, provider, fp8_inputs):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-# benchmark.run(show_plots=False, print_data=True)
+benchmark.run(show_plots=False, print_data=True)
