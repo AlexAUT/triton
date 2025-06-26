@@ -377,12 +377,12 @@ def matmul(a, b, activation=""):
 # We can test our custom matrix multiplication operation against a native torch implementation (i.e., cuBLAS).
 
 torch.manual_seed(0)
-a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
-b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
+# a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
+# b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
+a = torch.randn((32, 64), device=DEVICE, dtype=torch.float16) - 0.5
+b = torch.randn((32, 64), device=DEVICE, dtype=torch.float16) - 0.5
 b = b.T
-# a = torch.randn((32, 64), device=DEVICE, dtype=torch.float16)
 # a = a.T
-# b = torch.randn((64, 32), device=DEVICE, dtype=torch.float16)
 triton_output = matmul(a, b)
 torch_output = torch.matmul(a, b)
 print(f"triton_output_with_fp16_inputs={triton_output}")
