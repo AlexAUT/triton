@@ -166,7 +166,7 @@ initSchedule(int maxDist, int stages[SCHED_SIZE], int numStages,
   // If we use AsyncCopy we need one more buffer since we are not using a
   // register buffer
   if (useAsyncCopy) {
-    // numBuffers += 1;
+    numBuffers += 1;
   }
 
   LDBG("deduced max shared memory buffer number = " << numBuffers);

@@ -210,8 +210,10 @@ def get_hip_autotune_config():
         #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
         #     num_warps=4, num_stages=2),
         triton.Config(
-            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1},
-            num_warps=8, num_stages=2),
+            {
+                'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'waves_per_eu': 1,
+                'matrix_instr_nonkdim': 16
+            }, num_warps=8, num_stages=2),
         # triton.Config(
         #     {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2},
         #     num_warps=8, num_stages=2),
@@ -375,10 +377,10 @@ def matmul(a, b, activation=""):
 torch.manual_seed(0)
 a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
 b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
-# a = torch.randn((32, 64), device=DEVICE, dtype=torch.float16)
-# b = torch.randn((32, 64), device=DEVICE, dtype=torch.float16)
-b = b.T
-# a = a.T
+# a = torch.randn((512, 1024), device=DEVICE, dtype=torch.float16)
+# b = torch.randn((512, 1024), device=DEVICE, dtype=torch.float16)
+# b = b.T
+a = a.T
 triton_output = matmul(a, b)
 torch_output = torch.matmul(a, b)
 print(f"triton_output_with_fp16_inputs={triton_output}")
@@ -448,7 +450,7 @@ for fp8_inputs in [False, True]:
 def benchmark(M, N, K, provider, fp8_inputs):
     a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
     b = torch.randn((K, N), device=DEVICE, dtype=torch.float16)
-    b = b.T
+    a = a.T
     if TORCH_HAS_FP8 and fp8_inputs:
         a = a.to(torch.float8_e5m2)
         b = b.T
