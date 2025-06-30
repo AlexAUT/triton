@@ -79,26 +79,27 @@ struct CoalesceAsyncCopyWrites
       StringAttr kWarp = StringAttr::get(ctx, "warp");
       StringAttr kBlock = StringAttr::get(ctx, "block");
 
-      // 256x128
-      // std::vector<std::vector<int>> regBases = {{1, 0}, {2, 0}, {4, 0},
-      //                                           {0, 1}, {0, 2}, {0, 4}};
-      // std::vector<std::vector<int>> laneBases = {{8, 0},  {16, 0}, {32, 0},
-      //                                            {64, 0}, {0, 16}, {0, 32}};
-      // std::vector<std::vector<int>> warpBases = {{0, 8}, {0, 64}, {0, 128}};
+      unsigned contigDimSize = srcTy.getShape()[paddedEnc.getOrder()[0]];
+      llvm::outs() << "Contig size: " << contigDimSize << "\n";
 
-      // 256x64 contig at 64
-      // std::vector<std::vector<int>> regBases = {
-      //     {1, 0}, {2, 0}, {4, 0}, {0, 8}, {0, 128}};
-      // std::vector<std::vector<int>> laneBases = {{8, 0},  {16, 0}, {32, 0},
-      //                                            {0, 16}, {0, 32}, {0, 64}};
-      // std::vector<std::vector<int>> warpBases = {{0, 1}, {0, 2}, {0, 4}};
-
-      // 256x64 contig at 256
-      std::vector<std::vector<int>> regBases = {
-          {1, 0}, {2, 0}, {4, 0}, {0, 8}, {128, 0}};
-      std::vector<std::vector<int>> laneBases = {{8, 0},  {16, 0}, {32, 0},
-                                                 {64, 0}, {0, 16}, {0, 32}};
-      std::vector<std::vector<int>> warpBases = {{0, 1}, {0, 2}, {0, 4}};
+      std::vector<std::vector<int>> regBases;
+      std::vector<std::vector<int>> laneBases;
+      std::vector<std::vector<int>> warpBases;
+      if (contigDimSize == 256) {
+        regBases = {{1, 0}, {2, 0}, {4, 0}, {0, 8}, {128, 0}};
+        laneBases = {{8, 0}, {16, 0}, {32, 0}, {64, 0}, {0, 16}, {0, 32}};
+        warpBases = {{0, 1}, {0, 2}, {0, 4}};
+      }
+      if (contigDimSize == 128) {
+        regBases = {{1, 0}, {2, 0}, {4, 0}, {0, 1}, {0, 2}, {0, 4}};
+        laneBases = {{8, 0}, {16, 0}, {32, 0}, {64, 0}, {0, 16}, {0, 32}};
+        warpBases = {{0, 8}, {0, 64}, {0, 128}};
+      }
+      if (contigDimSize == 64) {
+        regBases = {{1, 0}, {2, 0}, {4, 0}, {0, 8}, {0, 128}};
+        laneBases = {{8, 0}, {16, 0}, {32, 0}, {0, 16}, {0, 32}, {0, 64}};
+        warpBases = {{0, 1}, {0, 2}, {0, 4}};
+      }
 
       auto transposeBases = [](std::vector<std::vector<int>> &vec) {
         for (auto &p : vec)
