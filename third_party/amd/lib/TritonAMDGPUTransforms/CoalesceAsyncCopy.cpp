@@ -79,11 +79,26 @@ struct CoalesceAsyncCopyWrites
       StringAttr kWarp = StringAttr::get(ctx, "warp");
       StringAttr kBlock = StringAttr::get(ctx, "block");
 
-      std::vector<std::vector<int>> regBases = {{1, 0}, {2, 0}, {4, 0},
-                                                {0, 1}, {0, 2}, {0, 4}};
+      // 256x128
+      // std::vector<std::vector<int>> regBases = {{1, 0}, {2, 0}, {4, 0},
+      //                                           {0, 1}, {0, 2}, {0, 4}};
+      // std::vector<std::vector<int>> laneBases = {{8, 0},  {16, 0}, {32, 0},
+      //                                            {64, 0}, {0, 16}, {0, 32}};
+      // std::vector<std::vector<int>> warpBases = {{0, 8}, {0, 64}, {0, 128}};
+
+      // 256x64 contig at 64
+      // std::vector<std::vector<int>> regBases = {
+      //     {1, 0}, {2, 0}, {4, 0}, {0, 8}, {0, 128}};
+      // std::vector<std::vector<int>> laneBases = {{8, 0},  {16, 0}, {32, 0},
+      //                                            {0, 16}, {0, 32}, {0, 64}};
+      // std::vector<std::vector<int>> warpBases = {{0, 1}, {0, 2}, {0, 4}};
+
+      // 256x64 contig at 256
+      std::vector<std::vector<int>> regBases = {
+          {1, 0}, {2, 0}, {4, 0}, {0, 8}, {128, 0}};
       std::vector<std::vector<int>> laneBases = {{8, 0},  {16, 0}, {32, 0},
                                                  {64, 0}, {0, 16}, {0, 32}};
-      std::vector<std::vector<int>> warpBases = {{0, 8}, {0, 64}, {0, 128}};
+      std::vector<std::vector<int>> warpBases = {{0, 1}, {0, 2}, {0, 4}};
 
       auto transposeBases = [](std::vector<std::vector<int>> &vec) {
         for (auto &p : vec)

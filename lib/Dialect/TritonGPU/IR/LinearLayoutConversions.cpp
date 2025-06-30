@@ -1741,6 +1741,25 @@ LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
 
     auto standardOutDims = standardOutDimNames(ctx, dstTy.getRank());
     // clang-format off
+    // 256x128
+    // std::vector<std::vector<int>> offsetBases = {
+    //    {1, 0},
+    //    {2, 0},
+    //    {4, 0},
+    //    {8, 0},
+    //    {16, 0},
+    //    {32, 0},
+    //    {64, 0},
+    //    {0, 16},
+    //    {0, 32},
+    //    {0, 1},
+    //    {0, 2},
+    //    {0, 4},
+    //    {0, 8},
+    //    {0, 64},
+    //    {0, 128},
+    // };
+    // 256x64, contig along 64
     std::vector<std::vector<int>> offsetBases = {
        {1, 0},
        {2, 0},
@@ -1748,14 +1767,13 @@ LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
        {8, 0},
        {16, 0},
        {32, 0},
-       {64, 0},
        {0, 16},
        {0, 32},
+       {0, 64},
        {0, 1},
        {0, 2},
        {0, 4},
        {0, 8},
-       {0, 64},
        {0, 128},
     };
     // clang-format on
@@ -1765,19 +1783,33 @@ LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
         std::swap(p[0], p[1]);
     };
 
-    if (triton::gpu::getOrder(dstTy)[0] != 0) {
+    // if (llvm::to_vector(regLayout.getOutDimSizes())[0] == 256) {
+    {
       transposeBases(offsetBases);
+      // 256x64 contig along 256
+      offsetBases = {
+          {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
+          {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {128, 0},
+      };
+    }
+    // auto sharedOrder = triton::gpu::getOrder(dstTy);
+    // triton::gpu::toLinearLayout(dstTy.getShape(), dstTy.getEncoding());
+    auto regOutDims = llvm::to_vector(regLayout.getOutDimNames());
+    if (triton::gpu::getOrder(dstTy)[0] != 1) {
+      transposeBases(offsetBases);
+      std::swap(regOutDims[0], regOutDims[1]);
     }
 
     LinearLayout rowSwizzled(
         {
             {kOffset, offsetBases},
         },
-        {standardOutDims[0], standardOutDims[1]});
+        {regOutDims[0], regOutDims[1]});
 
     llvm::outs() << "Src: " << regLayout << "\n";
     llvm::outs() << "Row swizzled: " << rowSwizzled << "\n";
     srcToSharedLayout = regLayout.invertAndCompose(rowSwizzled);
+    llvm::outs() << "Final pad to smem: " << srcToSharedLayout << "\n";
 
     // srcToSharedLayout =
     //     regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
