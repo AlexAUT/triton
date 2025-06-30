@@ -289,7 +289,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
                                flatSharedEnc, dstTy.getMemorySpace());
     }
     SmallVector<Value> ldsAddrs;
-    emitSharedAddresses(dstTy, ldsAddrs, vecTy, true);
+    emitSharedAddresses(dstTy, ldsAddrs, vecTy, false);
     return ldsAddrs;
   }
 
