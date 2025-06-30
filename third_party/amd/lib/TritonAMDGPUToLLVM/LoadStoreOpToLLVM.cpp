@@ -349,8 +349,9 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     // to compute the warp ID which improves codegen. shuffleIdx will be lowered
     // to readlane 0 placing it into a SGPR and hinting at LLVM that it
     // should use scalar ops which also allows it to better hoist values
-    Value tid =
-        targetInfo.shuffleIdx(rewriter, loc, getThreadId(rewriter, loc), 0);
+    // Value tid =
+    //     targetInfo.shuffleIdx(rewriter, loc, getThreadId(rewriter, loc), 0);
+    Value tid = getThreadId(rewriter, loc);
     int threadsPerWarp = triton::gpu::lookupThreadsPerWarp(rewriter);
     Value warpSizeVal = b.i32_val(threadsPerWarp);
     Value warpId = b.udiv(tid, warpSizeVal);
