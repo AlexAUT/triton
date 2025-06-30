@@ -380,7 +380,7 @@ b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
 # a = torch.randn((512, 1024), device=DEVICE, dtype=torch.float16)
 # b = torch.randn((512, 1024), device=DEVICE, dtype=torch.float16)
 # b = b.T
-a = a.T
+# a = a.T
 triton_output = matmul(a, b)
 torch_output = torch.matmul(a, b)
 print(f"triton_output_with_fp16_inputs={triton_output}")
@@ -452,7 +452,7 @@ for fp8_inputs in [False, True]:
 def benchmark(M, N, K, provider, fp8_inputs):
     a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
     b = torch.randn((K, N), device=DEVICE, dtype=torch.float16)
-    a = a.T
+    # a = a.T
     if TORCH_HAS_FP8 and fp8_inputs:
         fp8_dtype = torch.float8_e4m3fn if is_cuda() else torch.float8_e4m3fnuz
         a = a.to(fp8_dtype)
