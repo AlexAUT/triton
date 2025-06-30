@@ -1740,58 +1740,37 @@ LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
     StringAttr kBlock = StringAttr::get(ctx, "block");
 
     auto standardOutDims = standardOutDimNames(ctx, dstTy.getRank());
-    // clang-format off
-    // 256x128
-    // std::vector<std::vector<int>> offsetBases = {
-    //    {1, 0},
-    //    {2, 0},
-    //    {4, 0},
-    //    {8, 0},
-    //    {16, 0},
-    //    {32, 0},
-    //    {64, 0},
-    //    {0, 16},
-    //    {0, 32},
-    //    {0, 1},
-    //    {0, 2},
-    //    {0, 4},
-    //    {0, 8},
-    //    {0, 64},
-    //    {0, 128},
-    // };
+
+    // We hardcode sharedOrder == hbmOrder
+    unsigned contigSize = dstTy.getShape()[paddedLayout.getOrder()[0]];
+
     // 256x64, contig along 64
-    std::vector<std::vector<int>> offsetBases = {
-       {1, 0},
-       {2, 0},
-       {4, 0},
-       {8, 0},
-       {16, 0},
-       {32, 0},
-       {0, 16},
-       {0, 32},
-       {0, 64},
-       {0, 1},
-       {0, 2},
-       {0, 4},
-       {0, 8},
-       {0, 128},
-    };
-    // clang-format on
+    std::vector<std::vector<int>> offsetBases;
+
+    if (contigSize == 256) {
+      offsetBases = {
+          {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
+          {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {128, 0},
+      };
+    }
+    if (contigSize == 128) {
+      offsetBases = {
+          {1, 0},  {2, 0}, {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},  {0, 16},
+          {0, 32}, {0, 1}, {0, 2}, {0, 4}, {0, 8},  {0, 64}, {0, 128},
+      };
+    }
+    if (contigSize == 64) {
+      offsetBases = {
+          {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {0, 16},
+          {0, 32}, {0, 64}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {0, 128},
+      };
+    }
 
     auto transposeBases = [](std::vector<std::vector<int>> &vec) {
       for (auto &p : vec)
         std::swap(p[0], p[1]);
     };
 
-    // if (llvm::to_vector(regLayout.getOutDimSizes())[0] == 256) {
-    {
-      transposeBases(offsetBases);
-      // 256x64 contig along 256
-      offsetBases = {
-          {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
-          {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {128, 0},
-      };
-    }
     // auto sharedOrder = triton::gpu::getOrder(dstTy);
     // triton::gpu::toLinearLayout(dstTy.getShape(), dstTy.getEncoding());
     auto regOutDims = llvm::to_vector(regLayout.getOutDimNames());
