@@ -421,7 +421,7 @@ static ttg::AMDMfmaEncodingAttr getDotEncoding(Value inputValue,
 // needs to be used to be compatible with users' layouts.
 static std::optional<ttg::SharedEncodingTrait>
 getSharedEncIfAllUsersAreDotEnc(bool usePaddedLayout, Value loadedValue) {
-  ttg::SwizzledSharedEncodingAttr attr;
+  ttg::SharedEncodingTrait attr;
   for (Operation *user : loadedValue.getUsers()) {
     LDBG(" getSharedEncIfAllUsersAreDotEnc current user: " << *user);
     if (user->getNumResults() != 1)
@@ -465,12 +465,15 @@ getSharedEncIfAllUsersAreDotEnc(bool usePaddedLayout, Value loadedValue) {
         if (usePaddedLayout) {
           unsigned innerD = ttg::getShapePerCTA(ctaLayout.getCTASplitNum(),
                                                 srcTy.getShape())[order[0]];
+          unsigned byteWidth = std::max(bitWidth / 8u, 1u);
           unsigned threadNumBytes =
-              std::max(dotOpEnc.getKWidth() * bitWidth / 8u, 1u);
+              std::max(dotOpEnc.getKWidth() * byteWidth, 1u);
           threadNumBytes =
-              llvm::alignTo(threadNumBytes, 4); // Assume 32-bit per bank
+              llvm::alignTo(threadNumBytes,
+                            std::max(4u, byteWidth)); // Assume 32-bit per bank
+          unsigned paddingInElems = threadNumBytes / byteWidth;
           tempAttr = ttg::PaddedSharedEncodingAttr::get(
-              loadedValue.getContext(), {{innerD, threadNumBytes}}, sharedOrder,
+              loadedValue.getContext(), {{innerD, paddingInElems}}, sharedOrder,
               ctaLayout);
         } else {
           tempAttr = ttg::SwizzledSharedEncodingAttr::get(
@@ -808,8 +811,8 @@ void FourStagePipeliner::scheduleRemainingToLastStage() {
 }
 
 // Create an allocation that can hold distance number of loadOp shapes.
-Value FourStagePipeliner::createAlloc(
-    Operation *loadOp, ttg::SwizzledSharedEncodingAttr sharedEnc) {
+Value FourStagePipeliner::createAlloc(Operation *loadOp,
+                                      ttg::SharedEncodingTrait sharedEnc) {
   OpBuilder builder(forOp);
   Attribute sharedMemorySpace =
       ttg::SharedMemorySpaceAttr::get(forOp.getContext());

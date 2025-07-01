@@ -103,7 +103,7 @@ private:
   LogicalResult preprocessLoopAndBuildSchedule();
 
   Value createAlloc(Operation *loadOp,
-                    triton::gpu::SwizzledSharedEncodingAttr sharedEnc);
+                    triton::gpu::SharedEncodingTrait sharedEnc);
   bool createAsyncCopy(triton::LoadOp loadOp, Value alloc, Value extractIdx);
   void createStreamCopy(triton::LoadOp loadOp, Value alloc, Value extractIdx);
   void createStreamOps();

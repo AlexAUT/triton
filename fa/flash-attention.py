@@ -1434,8 +1434,8 @@ def test_op_fwd(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_alibi, layout, 
     # compare
     if layout == 'bshd':
         ref_out = ref_out.transpose(1, 2).clone()
-    ref_out = ref_out + 1
-    # torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
+    ref_out = ref_out
+    torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
     print("✅ Triton and Torch match")
 
 
