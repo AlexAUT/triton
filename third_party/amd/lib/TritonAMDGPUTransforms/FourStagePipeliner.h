@@ -14,6 +14,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Schedule.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 
@@ -145,7 +146,7 @@ private:
 
   struct LoadInfo {
     // Shared layout is used for loads feeding into dot ops.
-    triton::gpu::SwizzledSharedEncodingAttr sharedEncoding = nullptr;
+    triton::gpu::SharedEncodingTrait sharedEncoding = nullptr;
     // The distance of this load's stage to its use' stage.
     int distToUse = 0;
     bool usedByDot = false;
@@ -163,6 +164,9 @@ private:
 
   // Pipelining options for the PipelineExpander
   triton::PipeliningOption options;
+
+  bool usePaddedLayout{
+      triton::tools::getBoolEnv("TRITON_HIP_USE_PADDED_SHARED_LAYOUT")};
 };
 
 #endif

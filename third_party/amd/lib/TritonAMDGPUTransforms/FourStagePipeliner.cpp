@@ -419,22 +419,23 @@ static ttg::AMDMfmaEncodingAttr getDotEncoding(Value inputValue,
 // If all the transitive uses of the given value have are used by a convert to
 // the same dot operand encoding, return true and get the shared encoding that
 // needs to be used to be compatible with users' layouts.
-static std::optional<ttg::SwizzledSharedEncodingAttr>
-getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
+static std::optional<ttg::SharedEncodingTrait>
+getSharedEncIfAllUsersAreDotEnc(bool usePaddedLayout, Value loadedValue) {
   ttg::SwizzledSharedEncodingAttr attr;
   for (Operation *user : loadedValue.getUsers()) {
     LDBG(" getSharedEncIfAllUsersAreDotEnc current user: " << *user);
     if (user->getNumResults() != 1)
       return std::nullopt;
 
-    ttg::SwizzledSharedEncodingAttr tempAttr;
+    ttg::SharedEncodingTrait tempAttr;
     Value userResult = user->getResult(0);
     Type userResType = userResult.getType();
     if (auto memDesc = dyn_cast<ttg::MemDescType>(userResType)) {
       // First time we find a shared encoding in the chain, save it and try to
       // use it if it is compatible with the other users.
       tempAttr = cast<ttg::SwizzledSharedEncodingAttr>(memDesc.getEncoding());
-      if (!getSharedEncIfAllUsersAreDotEnc(userResult).has_value())
+      if (!getSharedEncIfAllUsersAreDotEnc(usePaddedLayout, userResult)
+               .has_value())
         return std::nullopt;
     } else {
       if (!isa<ttg::LocalLoadOp, ttg::ConvertLayoutOp>(user))
@@ -461,9 +462,21 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
 
       auto userResEnc = cast<ttg::TensorOrMemDesc>(userResType).getEncoding();
       if (auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(userResEnc)) {
-        tempAttr = ttg::SwizzledSharedEncodingAttr::get(
-            loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
-            ctaLayout, bitWidth, /*needTrans=*/false);
+        if (usePaddedLayout) {
+          unsigned innerD = ttg::getShapePerCTA(ctaLayout.getCTASplitNum(),
+                                                srcTy.getShape())[order[0]];
+          unsigned threadNumBytes =
+              std::max(dotOpEnc.getKWidth() * bitWidth / 8u, 1u);
+          threadNumBytes =
+              llvm::alignTo(threadNumBytes, 4); // Assume 32-bit per bank
+          tempAttr = ttg::PaddedSharedEncodingAttr::get(
+              loadedValue.getContext(), {{innerD, threadNumBytes}}, sharedOrder,
+              ctaLayout);
+        } else {
+          tempAttr = ttg::SwizzledSharedEncodingAttr::get(
+              loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
+              ctaLayout, bitWidth, /*needTrans=*/false);
+        }
       } else if (auto llEnc = dyn_cast<ttg::LinearEncodingAttr>(userResEnc)) {
         // We use linear layout directly for scaled dot fp8 operands. For such
         // cases, we need to look further down the def-use chain to find the dot
@@ -567,7 +580,8 @@ void FourStagePipeliner::assignMemoryLayouts() {
       // If the max continugous bits we can read is < 32, buffer in registers.
       if (width >= 32) {
         loadInfo.sharedEncoding =
-            getSharedEncIfAllUsersAreDotEnc(op->getResult(0)).value_or(nullptr);
+            getSharedEncIfAllUsersAreDotEnc(usePaddedLayout, op->getResult(0))
+                .value_or(nullptr);
       }
     } else if (auto useOp = dyn_cast<tt::LoadOp>(use)) {
       // The use of this loadOp is another loadOp. If the use is not in the
