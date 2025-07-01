@@ -539,14 +539,16 @@ bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
   // and sharedEncoding. We can only use AsyncCopy if the width is >= 32 bit
   auto srcTy = cast<RankedTensorType>(loadOp.getPtr().getType());
   auto dstTy = cast<ttg::MemDescType>(alloc.getType());
-  auto shape = srcTy.getShape();
-  auto regLayout = triton::gpu::toLinearLayout(shape, srcTy.getEncoding());
-  auto sharedLayout = triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
-  auto regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
-  unsigned loadContig = regToSharedLayout.getNumConsecutiveInOut();
-  unsigned width = loadContig * dstTy.getElementTypeBitWidth();
-  if (width < 32)
-    return false;
+  if (isa<ttg::SwizzledSharedEncodingAttr>(dstTy.getEncoding())) {
+    auto shape = srcTy.getShape();
+    auto regLayout = triton::gpu::toLinearLayout(shape, srcTy.getEncoding());
+    auto sharedLayout = triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
+    auto regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
+    unsigned loadContig = regToSharedLayout.getNumConsecutiveInOut();
+    unsigned width = loadContig * dstTy.getElementTypeBitWidth();
+    if (width < 32)
+      return false;
+  }
 
   // Checks whether the global pointer's contiguity and mask alignment allows
   // for at least 32 bit wide loads
@@ -669,7 +671,8 @@ LogicalResult preprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
   for (const auto &[load, info] : loadOpToIndLevel) {
     auto [distance, use] = info;
     auto sharedEncoding =
-        getSharedEncIfAllUsersAreDotEnc(load->getResult(0)).value_or(nullptr);
+        getSharedEncIfAllUsersAreDotEnc(usePaddedLayout, load->getResult(0))
+            .value_or(nullptr);
     loadToInfo[load] = {sharedEncoding, distance, use, false};
     maxDist = std::max(maxDist, distance);
   }
