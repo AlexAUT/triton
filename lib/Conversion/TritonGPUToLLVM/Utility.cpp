@@ -7,7 +7,10 @@
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
+#include "triton/Tools/LinearLayout.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/MathExtras.h"
 
 #if defined(_MSC_VER) && !defined(__clang__)
 // from https://gist.github.com/pps83/3210a2f980fd02bb2ba2e5a1fc4a2ef0
@@ -331,6 +334,10 @@ Value getSmemVecAddr(const LinearLayout &regLayout,
   // We propose case 2 (see comments below), which provides a more general
   // solution for all swizzled shared memory scenarios, including the edge case
   // mentioned above.
+  //
+  // Padded shared layout falls into case 1--we can rely on the logic for case 1
+  // to get the 1-D offset into shared memory. Then we just need to add the
+  // padding offset.
   if (isSimpleSharedMemoryAccess(shape, allocShape, sharedEnc)) { // Case 1
     smemOffset = applyLinearLayout(loc, rewriter, regToSharedLayout,
                                    {{kRegister, regId},
@@ -358,6 +365,18 @@ Value getSmemVecAddr(const LinearLayout &regLayout,
       // multi-dimensional offsets in regToSharedLayout.
       smemOffset = dot(rewriter, loc, smemOffsets,
                        applyPermutation(smemStrides, smemOrder));
+    }
+    if (auto paddedLayout =
+            dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedEnc)) {
+      // Apply the offset needed for padding.
+      Value padOffset = b.i32_val(0);
+      for (auto [interval, padding] : llvm::zip_equal(
+               paddedLayout.getIntervals(), paddedLayout.getPaddings())) {
+        Value iVal = b.i32_val(llvm::Log2_32(interval));
+        Value pVal = b.i32_val(llvm::Log2_32(padding));
+        padOffset = b.add(padOffset, b.shl(b.ashr(smemOffset, iVal), pVal));
+      }
+      smemOffset = b.add(smemOffset, padOffset);
     }
   } else { // Case 2 -> rank-reduced swizzling
     assert(rank >= 2 && "Swizzling only applies to tensors with rank >= 2");
@@ -425,11 +444,19 @@ bool emitTransferBetweenRegistersAndShared(
   StringAttr kRegister = str_attr("register");
   StringAttr kLane = str_attr("lane");
   StringAttr kWarp = str_attr("warp");
+  StringAttr kOffset = str_attr("offset");
 
   auto shape = sharedTy.getShape();
-  LinearLayout sharedLayout =
-      triton::gpu::toLinearLayout(shape, sharedTy.getEncoding());
-  LinearLayout regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
+  auto paddedLayout =
+      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedTy.getEncoding());
+  LinearLayout regToSharedLayout = LinearLayout::empty();
+  if (paddedLayout) {
+    regToSharedLayout =
+        regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
+  } else {
+    auto sharedLL = triton::gpu::toLinearLayout(shape, sharedTy.getEncoding());
+    regToSharedLayout = regLayout.invertAndCompose(sharedLL);
+  }
 
   // TODO(jlebar): We don't currently support loading from shared memory in a
   // different CTA.  We'd need to emit `mapa.shared::cluster` instructions.
@@ -454,9 +481,12 @@ bool emitTransferBetweenRegistersAndShared(
   //
   // It's OK if the vector width we choose here is wider than the hardware
   // supports; LLVM will legalize it.
-  const int vecElems =
-      std::min(regToSharedLayout.getNumConsecutiveInOut(),
-               maxVecElems.value_or(std::numeric_limits<int>::max()));
+  int vecElems =
+      std::min({regToSharedLayout.getNumConsecutiveInOut(),
+                maxVecElems.value_or(std::numeric_limits<int>::max())});
+  if (paddedLayout) {
+    vecElems = std::min(vecElems, int(paddedLayout.getMinInterval()));
+  }
 
   auto withCTAOffset = triton::gpu::getNumCTAs(sharedTy.getEncoding()) > 1;
   auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
@@ -482,10 +512,14 @@ bool emitTransferBetweenRegistersAndShared(
   // take out the "block" dimension.
   // Thus we use `pseudoinvert` instead of `invert` here for simplicity.
   auto allocShape = sharedTy.getAllocShape();
-  LinearLayout invertAllocSharedLayout =
-      triton::gpu::toLinearLayout(allocShape.take_back(sharedTy.getRank()),
-                                  sharedTy.getEncoding())
-          .pseudoinvert();
+  auto invertAllocSharedLayout = LinearLayout::empty();
+  if (!paddedLayout) {
+    // For now this is only needed for the cases where we have swizzling.
+    invertAllocSharedLayout =
+        triton::gpu::toLinearLayout(allocShape.take_back(sharedTy.getRank()),
+                                    sharedTy.getEncoding())
+            .pseudoinvert();
+  }
 
   int numElems = regToSharedLayout.getInDimSize(kRegister);
   auto vecTy = vec_ty(elemLlvmTy, vecElems);
@@ -509,6 +543,7 @@ bool emitTransferBetweenRegistersAndShared(
     bool forceLane0) {
   auto regLayout = triton::gpu::toLinearLayout(registerTy.getShape(),
                                                registerTy.getEncoding());
+  auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
   return emitTransferBetweenRegistersAndShared(
       regLayout, sharedTy, elemLlvmTy, maxVecElems, smemObj, loc, rewriter,
       target, perVectorCallback, forceLane0);
@@ -699,10 +734,13 @@ bool isSimpleSharedMemoryAccess(ArrayRef<int64_t> shape,
                                 ArrayRef<int64_t> allocShape,
                                 triton::gpu::SharedEncodingTrait sharedEnc) {
   auto rank = shape.size();
+  auto paddedLayout =
+      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedEnc);
   auto swizzledLayout =
       dyn_cast<triton::gpu::SwizzledSharedEncodingAttr>(sharedEnc);
   auto nvmmaLayout = dyn_cast<triton::gpu::NVMMASharedEncodingAttr>(sharedEnc);
-  bool noSwizzling = (swizzledLayout && swizzledLayout.getMaxPhase() == 1) ||
+  bool noSwizzling = paddedLayout ||
+                     (swizzledLayout && swizzledLayout.getMaxPhase() == 1) ||
                      (nvmmaLayout && nvmmaLayout.getSwizzlingByteWidth() == 0);
   return /*no swizzling*/ noSwizzling ||
          /*swizzling but same shape*/ shape == allocShape ||
