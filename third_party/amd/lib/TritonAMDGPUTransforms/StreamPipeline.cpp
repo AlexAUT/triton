@@ -314,18 +314,21 @@ bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
   // directly to lds
   auto srcTy = cast<RankedTensorType>(loadOp.getPtr().getType());
   auto dstTy = cast<ttg::MemDescType>(alloc.getType());
-  auto regLayout = triton::gpu::toLinearLayout(srcTy);
-  // It's the allocation so we can pass the srcTy shape
-  auto srcShape = srcTy.getShape();
-  auto sharedLayout =
-      triton::gpu::toLinearLayout(srcShape, dstTy.getEncoding(), srcShape);
-  auto regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
 
-  unsigned vecSize = regToSharedLayout.getNumConsecutiveInOut();
-  unsigned elemBitWidth = dstTy.getElementTypeBitWidth();
+  if (isa<ttg::SwizzledSharedEncodingAttr>(dstTy.getEncoding())) {
+    auto regLayout = triton::gpu::toLinearLayout(srcTy);
+    // It's the allocation so we can pass the srcTy shape
+    auto srcShape = srcTy.getShape();
+    auto sharedLayout =
+        triton::gpu::toLinearLayout(srcShape, dstTy.getEncoding(), srcShape);
+    auto regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
 
-  if (fitToValidDirectToLdsVecSize(vecSize, elemBitWidth, targetInfo) == 0)
-    return false;
+    unsigned vecSize = regToSharedLayout.getNumConsecutiveInOut();
+    unsigned elemBitWidth = dstTy.getElementTypeBitWidth();
+
+    if (fitToValidDirectToLdsVecSize(vecSize, elemBitWidth, targetInfo) == 0)
+      return false;
+  }
 
   // Checks whether the global pointer's contiguity and mask alignment allows
   // for at least 32 bit wide loads
