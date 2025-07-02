@@ -232,8 +232,6 @@ bool FourStagePipeliner::createAsyncCopy(tt::LoadOp loadOp, Value alloc,
   auto srcTy = cast<triton::gpu::TensorOrMemDesc>(src.getType());
 
   ttg::MemDescType allocTy = cast<ttg::MemDescType>(alloc.getType());
-  auto sharedEncodingAttr =
-      cast<ttg::SwizzledSharedEncodingAttr>(allocTy.getEncoding());
 
   // Extract local subview from shared allocation
   Value zero = builder.create<arith::ConstantIntOp>(forOp.getLoc(), 0, 32);
@@ -463,6 +461,8 @@ getSharedEncIfAllUsersAreDotEnc(bool usePaddedLayout, Value loadedValue) {
       auto userResEnc = cast<ttg::TensorOrMemDesc>(userResType).getEncoding();
       if (auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(userResEnc)) {
         if (usePaddedLayout) {
+          // && llvm::is_contained(srcTy.getShape(), 64) &&
+          // llvm::is_contained(srcTy.getShape(), 128)) {
           unsigned innerD = ttg::getShapePerCTA(ctaLayout.getCTASplitNum(),
                                                 srcTy.getShape())[order[0]];
           unsigned byteWidth = std::max(bitWidth / 8u, 1u);

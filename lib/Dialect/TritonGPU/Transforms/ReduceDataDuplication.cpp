@@ -47,11 +47,30 @@ public:
       auto order = getOrderForMemory(srcType);
       auto sharedMemorySpace =
           triton::gpu::SharedMemorySpaceAttr::get(srcType.getContext());
+
+      namespace ttg = triton::gpu;
+      auto ctaLayout = ttg::getCTALayout(srcEncoding);
+      auto srcTy = srcType;
+      unsigned bitWidth = 16;
+      auto dotOpEnc = dstDotOp;
+      auto *ctx = cvtOp->getContext();
+      unsigned innerD = ttg::getShapePerCTA(ctaLayout.getCTASplitNum(),
+                                            srcTy.getShape())[order[0]];
+      unsigned byteWidth = std::max(bitWidth / 8u, 1u);
+      unsigned threadNumBytes = std::max(dotOpEnc.getKWidth() * byteWidth, 1u);
+      auto sharedOrder = getOrderForMemory(srcTy);
+      threadNumBytes = llvm::alignTo(
+          threadNumBytes, std::max(4u, byteWidth)); // Assume 32-bit per bank
+      unsigned paddingInElems = threadNumBytes / byteWidth;
+      auto paddedAttr = ttg::PaddedSharedEncodingAttr::get(
+          ctx, {{innerD, paddingInElems}}, sharedOrder, ctaLayout);
+
       auto tmpType = triton::gpu::MemDescType::get(
-          dstType.getShape(), dstType.getElementType(),
-          triton::gpu::SwizzledSharedEncodingAttr::get(
-              mod.getContext(), dstDotOp, srcType.getShape(), order,
-              triton::gpu::getCTALayout(srcEncoding), srcType.getElementType()),
+          dstType.getShape(), dstType.getElementType(), paddedAttr,
+          // triton::gpu::SwizzledSharedEncodingAttr::get(
+          //     mod.getContext(), dstDotOp, srcType.getShape(), order,
+          //     triton::gpu::getCTALayout(srcEncoding),
+          //     srcType.getElementType()),
           sharedMemorySpace);
       auto tmp = builder.create<triton::gpu::LocalAllocOp>(
           cvtOp.getLoc(), tmpType, cvtOp.getSrc());

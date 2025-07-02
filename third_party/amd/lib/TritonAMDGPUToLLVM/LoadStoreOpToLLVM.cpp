@@ -655,8 +655,11 @@ struct BufferLoadToLocalOpConversion
 
     auto ldsBaseAddresses = emitSharedBaseAddr(
         rewriter, op, ptrType, dstTy, hasSwizzling, resElemTy, llDst, vecTy);
-    auto swizzleOffsets = emitSwizzleOffsets(op, rewriter, ptrType, dstTy,
-                                             vecTy, ldsBaseAddresses.size());
+    SmallVector<Value> swizzleOffsets;
+    if (hasSwizzling) {
+      swizzleOffsets = emitSwizzleOffsets(op, rewriter, ptrType, dstTy, vecTy,
+                                          ldsBaseAddresses.size());
+    }
 
     int vecBytes =
         (vecTy.getNumElements() * vecTy.getElementTypeBitWidth()) / 8;
