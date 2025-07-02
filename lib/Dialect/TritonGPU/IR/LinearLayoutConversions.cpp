@@ -1743,27 +1743,46 @@ LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
 
     // We hardcode sharedOrder == hbmOrder
     unsigned contigSize = dstTy.getShape()[paddedLayout.getOrder()[0]];
+    unsigned nonContigSize = dstTy.getShape()[paddedLayout.getOrder()[1]];
 
     // 256x64, contig along 64
     std::vector<std::vector<int>> offsetBases;
 
     if (contigSize == 256) {
-      offsetBases = {
-          {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
-          {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {128, 0},
-      };
+      if (nonContigSize == 64) {
+        offsetBases = {
+            {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
+            {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {128, 0},
+        };
+      } else {
+        assert(false);
+      }
     }
     if (contigSize == 128) {
-      offsetBases = {
-          {1, 0},  {2, 0}, {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},  {0, 16},
-          {0, 32}, {0, 1}, {0, 2}, {0, 4}, {0, 8},  {0, 64}, {0, 128},
-      };
+      if (nonContigSize == 64) {
+        offsetBases = {
+            {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
+            {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
+        };
+      } else if (nonContigSize == 256) {
+        offsetBases = {
+            {1, 0},  {2, 0},  {4, 0},  {8, 0},  {16, 0},
+            {32, 0}, {64, 0}, {0, 16}, {0, 32}, {0, 1},
+            {0, 2},  {0, 4},  {0, 8},  {0, 64}, {0, 128},
+        };
+      } else {
+        assert(false);
+      }
     }
     if (contigSize == 64) {
-      offsetBases = {
-          {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {0, 16},
-          {0, 32}, {0, 64}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {0, 128},
-      };
+      if (nonContigSize == 256) {
+        offsetBases = {
+            {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {0, 16},
+            {0, 32}, {0, 64}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {0, 128},
+        };
+      } else {
+        assert(false);
+      }
     }
 
     auto transposeBases = [](std::vector<std::vector<int>> &vec) {

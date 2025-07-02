@@ -379,7 +379,7 @@ def matmul(a, b, activation=""):
 
 torch.manual_seed(0)
 a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
-b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16) = 0.5
+b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
 # a = torch.randn((512, 1024), device=DEVICE, dtype=torch.float16)
 # b = torch.randn((512, 1024), device=DEVICE, dtype=torch.float16)
 # b = b.T
