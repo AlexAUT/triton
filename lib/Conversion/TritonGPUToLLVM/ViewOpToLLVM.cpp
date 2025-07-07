@@ -485,7 +485,7 @@ struct MemDescSubviewOpConversion
     }
 
     // For padded layouts we compute a flat offset for the reduced dimensions
-    SmallVector<Value> padding = smemObj.getPadding(srcTy, loc, rewriter);
+    // SmallVector<Value> padding = smemObj.getPadding(srcTy, loc, rewriter);
 
     Value offset;
     if (rankReduced || (destTy.getRank() == 1 && destTy.getDimSize(0) == 1)) {
@@ -515,11 +515,17 @@ struct MemDescSubviewOpConversion
         rewriter.create<LLVM::BrOp>(loc, afterLoad);
         rewriter.setInsertionPointToStart(afterLoad);
       };
-      auto padPerDim = smemObj.getPaddingPerDim(0, srcTy, loc, rewriter);
-      auto padding = b.mul(padPerDim, opOffsetVals[0]);
-      offset = b.add(offset, padding);
-      // printValue("Padding: ", ValueRange{padding});
-      // printValue("Offset: ", ValueRange{offset});
+      if (auto paddedLayout = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
+              srcTy.getEncoding())) {
+        Value padOffset = b.i32_val(0);
+        for (auto [interval, padding] : llvm::zip_equal(
+                 paddedLayout.getIntervals(), paddedLayout.getPaddings())) {
+          Value iVal = b.i32_val(llvm::Log2_32(interval));
+          Value pVal = b.i32_val(llvm::Log2_32(padding));
+          padOffset = b.add(padOffset, b.shl(b.ashr(offset, iVal), pVal));
+        }
+        offset = b.add(offset, padOffset);
+      }
     } else {
       auto dimNames = standardOutDimNames(ctx, opOffsetVals.size());
       SmallVector<std::pair<StringAttr, Value>> logicalOffsets;
