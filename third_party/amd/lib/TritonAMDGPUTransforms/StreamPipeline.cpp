@@ -37,7 +37,8 @@ namespace mlir {
 #include "TritonAMDGPUTransforms/Passes.h.inc"
 
 namespace fourStage {
-LogicalResult pipelineLoop(scf::ForOp forOp, int numStages, bool useAsyncCopy);
+LogicalResult attPipelineLoop(scf::ForOp forOp, int numStages,
+                              bool useAsyncCopy);
 }
 
 namespace {
@@ -836,7 +837,7 @@ struct PipelinePass : impl::TritonAMDGPUStreamPipelineBase<PipelinePass> {
         LDBG("Loop not safe to pipeline:\n" << *forOp);
         continue;
       }
-      if (succeeded(fourStage::pipelineLoop(
+      if (succeeded(fourStage::attPipelineLoop(
               forOp, tt::getNumStagesOrDefault(forOp, numStages),
               useAsyncCopy))) {
         continue;
@@ -1397,7 +1398,8 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
   return success();
 }
 
-LogicalResult pipelineLoop(scf::ForOp forOp, int numStages, bool useAsyncCopy) {
+LogicalResult attPipelineLoop(scf::ForOp forOp, int numStages,
+                              bool useAsyncCopy) {
   // Note that we already checked general things (like no barriers, distances
   // etc.)
   // Check if we can 4-stage pipeline loop
