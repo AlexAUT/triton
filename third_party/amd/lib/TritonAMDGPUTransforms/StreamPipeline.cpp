@@ -125,6 +125,7 @@ enum FS_CLUSTERS {
   ALU2,
   // Cluster1
   ASYNCWAIT2,
+  LWRITE1,
   LLOAD2,
   LOAD1,
   // Cluster2
@@ -132,6 +133,7 @@ enum FS_CLUSTERS {
   ALU1,
   // Cluster3
   ASYNCWAIT1,
+  LWRITE2,
   LLOAD1,
   LOAD2,
 
@@ -142,11 +144,13 @@ enum FS_STAGES {
   STAGE_DOT1 = 2,
   STAGE_ALU1 = 2,
   STAGE_LOAD1 = 0,
+  STAGE_LWRITE1 = 1,
   STAGE_LLOAD1 = 1,
 
   STAGE_DOT2 = 3,
   STAGE_ALU2 = 3,
   STAGE_LOAD2 = 1,
+  STAGE_LWRITE2 = 2,
   STAGE_LLOAD2 = 3,
 };
 
@@ -521,6 +525,89 @@ void createAndScheduleStreamCopy(
   loadOp.erase();
 }
 
+void fourStageCreateAndScheduleStreamCopy(
+    tt::LoadOp loadOp, Value alloc, Value extractIdx, scf::ForOp forOp,
+    tt::CoarseSchedule &schedule,
+    const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
+        &clusters) {
+  OpBuilder builder(forOp);
+  Value zero = builder.create<arith::ConstantIntOp>(forOp.getLoc(), 0, 32);
+  // Replace the load with insert/extract slice.
+  builder.setInsertionPoint(loadOp);
+  Location loc = loadOp.getLoc();
+
+  ttg::MemDescType allocTy = cast<ttg::MemDescType>(alloc.getType());
+  SmallVector<Value> copyOffsets(allocTy.getRank(), zero);
+  Operation *copy = builder.clone(*loadOp);
+
+  auto [loadStage, loadCluster] = schedule[loadOp];
+  schedule.erase(loadOp);
+  schedule.insert(copy, loadStage, loadCluster);
+
+  // Extract part.
+  SmallVector<Value> loadOffsets(allocTy.getRank(), zero);
+  loadOffsets[0] = extractIdx;
+  auto sharedMemorySpace = ttg::SharedMemorySpaceAttr::get(forOp.getContext());
+  auto subviewTy = ttg::MemDescType::get(
+      allocTy.getShape().drop_front(), allocTy.getElementType(),
+      allocTy.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
+  auto viewLoad =
+      builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
+  // Clean up old local caches.
+  SmallVector<ttg::LocalAllocOp> allocsToErase;
+  for (Operation *user : loadOp->getUsers()) {
+    if (auto userAlloc = dyn_cast<ttg::LocalAllocOp>(user)) {
+      tt::replaceUsesAndPropagateType(builder, userAlloc, viewLoad.getResult());
+      allocsToErase.push_back(userAlloc);
+    }
+  }
+  for (auto allocToErase : allocsToErase)
+    allocToErase.erase();
+
+  // Prefetch load ahead of the dot stage if is used by the dot.
+  auto storeOp =
+      builder.create<ttg::LocalStoreOp>(loc, copy->getResult(0), viewLoad);
+
+  // Create local load
+  auto sharedLoad =
+      builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewLoad);
+  Value result = sharedLoad.getResult();
+  // if (stages[SCHED_LOCAL_LOAD] != stages[SCHED_COMPUTE])
+  //   schedule.insert(sharedLoad, stages[SCHED_LOCAL_LOAD],
+  //                   clusters[SCHED_LOCAL_LOAD]);
+
+  if (loadStage == FS_STAGES::STAGE_LOAD1) {
+    schedule.insert(storeOp, FS_STAGES::STAGE_LWRITE1,
+                    clusters[FS_CLUSTERS::LWRITE1]);
+    schedule.insert(sharedLoad, FS_STAGES::STAGE_LLOAD1,
+                    clusters[FS_CLUSTERS::LLOAD1]);
+  } else {
+    schedule.insert(storeOp, FS_STAGES::STAGE_LWRITE2,
+                    clusters[FS_CLUSTERS::LWRITE2]);
+    schedule.insert(sharedLoad, FS_STAGES::STAGE_LLOAD2,
+                    clusters[FS_CLUSTERS::LLOAD2]);
+  }
+
+  // If the currently processed `LoadOp` is labeled with an index regarding
+  // to which `DotOp` operand the corresponding data belongs to, then label the
+  // expanded `LocalStoreOp` with the same index. This is required for
+  // instruction scheduling hints to correctly count the emitted `ds_write`
+  // instructions for each GEMM tile.
+  if (auto attr = loadOp->getAttr(tt::amdgpu::OpIdxAttr::getMnemonic())) {
+    storeOp->setAttr(tt::amdgpu::OpIdxAttr::getMnemonic(), attr);
+  }
+
+  loadOp->replaceAllUsesWith(ValueRange{result});
+
+  if (auto cvt =
+          dyn_cast<ttg::ConvertLayoutOp>(*sharedLoad->getUsers().begin())) {
+    auto [localLoadStage, localLoadCluster] = schedule[sharedLoad];
+    schedule.insert(cvt, localLoadStage, localLoadCluster);
+  }
+
+  loadOp.erase();
+}
+
 // Returns the given |inputValue|'s dot user result encoding and updates |opIdx|
 // with which dot operand |inputValue| is fed into if possible.
 static ttg::AMDMfmaEncodingAttr getDotEncoding(Value inputValue,
@@ -833,9 +920,8 @@ SmallVector<std::pair<Operation *, Value>> fourStageCreateAndScheduleStreamOps(
         fourStageCreateAndScheduleAsyncCopy(loadOp, alloc, extractIdx, forOp,
                                             schedule, clusters);
       } else {
-        // createAndScheduleStreamCopy(loadOp, alloc, extractIdx, forOp,
-        // schedule,
-        //                             stages, clusters);
+        fourStageCreateAndScheduleStreamCopy(loadOp, alloc, extractIdx, forOp,
+                                             schedule, clusters);
       }
     }
   }
@@ -1261,11 +1347,6 @@ LogicalResult fourStagePipelineLoop(scf::ForOp forOp, int numStages,
   auto dotCount = llvm::range_size(forOp.getBody()->getOps<tt::DotOp>());
   if (dotCount != 2) {
     LDBG("Does only sypport 2 dots");
-    return failure();
-  }
-
-  if (!useAsyncCopy) {
-    LDBG("Only works with AsyncCopy!");
     return failure();
   }
 
