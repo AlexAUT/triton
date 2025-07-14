@@ -936,73 +936,31 @@ LogicalResult fourStageScheduleOpsBetweenDots(
     const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
         &clusters) {
   auto dotOps = llvm::to_vector(forOp.getBody()->getOps<tt::DotOp>());
-  auto it = forOp.getBody()->getOps<tt::DotOp>();
 
-  auto [dot1Stage, dot1Cluster] = schedule[dotOps[0]];
-  auto [dot2Stage, dot2Cluster] = schedule[dotOps[1]];
+  SetVector<Operation *> dot0Slice;
+  getForwardSlice(Value(dotOps[0]), &dot0Slice);
 
-  // Walk along use-chain of dot1 towards dot2 and label ops by distance. Note
-  // that this will also label uses not feeding into the second op. We remove
-  // them in a cleanup afterwards
-  llvm::MapVector<Value, int> opToDistance;
-  llvm::MapVector<Value, int> cleanedOpToDistance;
-
-  llvm::SmallVector<Value> leaves;
-
-  SmallVector<Value> queue = {dotOps[0]};
-  opToDistance[dotOps[0]] = 0;
-  bool reachedDot1 = false;
-  while (!queue.empty()) {
-    auto v = queue.pop_back_val();
-    assert(opToDistance.contains(v));
-    auto distance = opToDistance[v];
-    bool addedUser = false;
-    for (Operation *user : v.getUsers()) {
-      if (user->getNumResults() == 0)
-        continue;
-      // TODO we should probably do a min or max here or store a set of
-      // distances per OP?
-      // Iterate over all results?
-      // llvm::outs() << "User: " << *user << "\n";
-      // llvm::outs().flush();
-      int newDistance = distance + 1;
-      auto storedDistance = opToDistance.find(user->getResult(0));
-      if (storedDistance != opToDistance.end()) {
-        newDistance = std::min(newDistance, storedDistance->second);
-      }
-      opToDistance[user->getResult(0)] = newDistance;
-
-      if (user != dotOps[1]) {
-        addedUser = true;
-        queue.push_back(user->getResult(0));
-      } else {
-        reachedDot1 = true;
-      }
-    }
-    if (!addedUser)
-      leaves.push_back(v);
-  }
-
-  if (!reachedDot1) {
-    LDBG("Second dot has to indirectly consume the result from the first");
+  if (!dot0Slice.contains(dotOps[1])) {
+    LDBG("Dot1 does not feed into Dot2");
     return failure();
   }
-
-  // Cleanup all ops which do not feed into the second dot
-  queue.clear();
-  queue.push_back(dotOps[1]);
-
-  int maxDistance = 0;
 
   // For each operand of the second dot we go back and search for a good point
   // to split it across the two stages. Good points are when we expand/broadcast
   // so we have to loop carry less stuff. We do not care too much about equal
   // work in both clusters especially since the second alu cluster gets work
   // required for things after the dot2
-
   for (auto operand : dotOps[1]->getOperands()) {
-    if (!opToDistance.contains(operand))
+    if (!dot0Slice.contains(operand.getDefiningOp()))
       continue;
+
+    // Sched the operand as alu2
+    auto operandDefOp = operand.getDefiningOp();
+    if (operandDefOp && dot0Slice.contains(operandDefOp) &&
+        schedule.count(operand.getDefiningOp()) == 0) {
+      schedule.insert(operandDefOp, FS_STAGES::STAGE_ALU2,
+                      clusters[FS_CLUSTERS::ALU2]);
+    }
 
     LDBG("Check dot operand: " << operand);
     // Go along until we find a real alu op
@@ -1012,12 +970,14 @@ LogicalResult fourStageScheduleOpsBetweenDots(
     queue.push_back({operand, false});
     while (!queue.empty()) {
       auto [v, splitOnAlu] = queue.pop_back_val();
-      if (!opToDistance.contains(v)) {
+      auto defOp = v.getDefiningOp();
+      if (!defOp)
+        continue;
+
+      if (!dot0Slice.contains(defOp)) {
         LDBG("Found unrelated op to previous dot: " << v);
         continue;
       }
-
-      auto defOp = v.getDefiningOp();
 
       // If the op has already a schedule we abort this path
       if (schedule.count(defOp) != 0) {
@@ -1046,12 +1006,15 @@ LogicalResult fourStageScheduleOpsBetweenDots(
     }
   }
 
-  for (Value leaf : leaves) {
-    LDBG("Leaves :" << leaf);
-    auto defOp = leaf.getDefiningOp();
-    if (!defOp || schedule.count(defOp) != 0)
+  // Schedule ops using dot1 but not feeding into dot2 to overlap with dot2
+  auto yield = forOp.getBody()->getTerminator();
+  for (auto yieldOperand : yield->getOperands()) {
+    auto defOp = yieldOperand.getDefiningOp();
+    if (!defOp || !dot0Slice.contains(defOp))
       continue;
 
+    if (schedule.count(defOp) != 0)
+      continue;
     schedule.insert(defOp, FS_STAGES::STAGE_ALU2, clusters[FS_CLUSTERS::ALU2]);
   }
 
