@@ -124,14 +124,16 @@ enum FS_CLUSTERS {
   DOT1,
   ALU2,
   // Cluster1
-  LOAD1,
+  ASYNCWAIT2,
   LLOAD2,
+  LOAD1,
   // Cluster2
   DOT2,
   ALU1,
   // Cluster3
-  LOAD2,
+  ASYNCWAIT1,
   LLOAD1,
+  LOAD2,
 
   COUNT
 };
@@ -422,17 +424,15 @@ void fourStageCreateAndScheduleAsyncCopy(
   // Place ttg.async_commit_group op following AsyncCopyGlobalToLocal so the
   // later UpdateAsyncWaitCount pass can deduce better waitcnts
   schedule.insert(commitOp, loadStage, loadCluster);
-  // If the LocalLoads are scheduled to a later stage than AsyncCopy we need to
-  // place the AsyncCopy prefetches after the AsyncWaits which create a barrier
-  // to ensure all warps are finished reading the shared buffer we will write
-  // into. This is done by scheduling AsyncWait as the first cluster.
-  // If AsyncCopy and LocalLoads are in the same stage we do not assign a
-  // schdule so they are placed before the LocalLoads
 
   if (loadStage == FS_STAGES::STAGE_LOAD1) {
+    schedule.insert(waitOp, FS_STAGES::STAGE_LLOAD1,
+                    clusters[FS_CLUSTERS::ASYNCWAIT1]);
     schedule.insert(sharedLoad, FS_STAGES::STAGE_LLOAD1,
                     clusters[FS_CLUSTERS::LLOAD1]);
   } else {
+    schedule.insert(waitOp, FS_STAGES::STAGE_LLOAD2,
+                    clusters[FS_CLUSTERS::ASYNCWAIT2]);
     schedule.insert(sharedLoad, FS_STAGES::STAGE_LLOAD2,
                     clusters[FS_CLUSTERS::LLOAD2]);
   }
