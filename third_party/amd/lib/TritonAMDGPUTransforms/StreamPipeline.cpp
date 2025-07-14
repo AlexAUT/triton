@@ -927,7 +927,7 @@ void fourStageScheduleOpsBetweenDots(
     if (!opToDistance.contains(operand))
       continue;
 
-    llvm::outs() << "Check dot operand: " << operand << "\n";
+    LDBG("Check dot operand: " << operand);
     // Go along until we find a real alu op
     // Store the next value to follow and a bool to signal if we have passed a
     // broadcast/expand_dim so we want to split on the next alu op
@@ -936,7 +936,7 @@ void fourStageScheduleOpsBetweenDots(
     while (!queue.empty()) {
       auto [v, splitOnAlu] = queue.pop_back_val();
       if (!cleanedOpToDistance.contains(v)) {
-        llvm::outs() << "Found unrelated op to previous dot: " << v << "\n";
+        LDBG("Found unrelated op to previous dot: " << v);
         continue;
       }
 
@@ -944,7 +944,7 @@ void fourStageScheduleOpsBetweenDots(
 
       // If the op has already a schedule we abort this path
       if (schedule.count(defOp) != 0) {
-        llvm::outs() << "Found op with previous schedule: " << v << "\n";
+        LDBG("Found op with previous schedule: " << v);
         continue;
       }
 
@@ -957,13 +957,12 @@ void fourStageScheduleOpsBetweenDots(
                                math::MathDialect::getDialectNamespace();
 
       if (splitOnAlu && isAluOp) {
-        llvm::outs() << "Found alu op schedule to first alu cluster: " << *defOp
-                     << "\n";
+        LDBG("Found alu op schedule to first alu cluster: " << *defOp);
         schedule.insert(defOp, FS_STAGES::STAGE_ALU1,
                         clusters[FS_CLUSTERS::ALU1]);
         continue;
       }
-      llvm::outs() << "Skip non alu op: " << *defOp << "\n";
+      LDBG("Skip non alu op: " << *defOp);
       for (Value op2 : defOp->getOperands()) {
         queue.push_back({op2, splitOnAlu || !isAluOp});
       }
@@ -971,7 +970,7 @@ void fourStageScheduleOpsBetweenDots(
   }
 
   for (Value leaf : leaves) {
-    llvm::outs() << "Leaves :" << leaf << "\n";
+    LDBG("Leaves :" << leaf);
     auto defOp = leaf.getDefiningOp();
     if (!defOp || schedule.count(defOp) != 0)
       continue;
@@ -996,11 +995,6 @@ void fourStageScheduleOpsBetweenDots(
   //     llvm::outs() << "Cleaned Distance " << d << ": " << v << "\n";
   //   }
   // }
-
-  llvm::outs() << "Sizes: " << opToDistance.size() << " vs "
-               << cleanedOpToDistance.size() << "\n";
-
-  // assert(false);
 }
 
 LogicalResult
@@ -1027,7 +1021,7 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
 
   if (llvm::any_of(loadOpToIndLevel,
                    [](auto it) { return it.second.first != 0; })) {
-    llvm::outs() << "Does not support indirect loads yet\n";
+    LDBG("Does not support indirect loads yet\n");
     return failure();
   }
 
@@ -1266,23 +1260,23 @@ LogicalResult fourStagePipelineLoop(scf::ForOp forOp, int numStages,
   // Check if we can 4-stage pipeline loop
   auto dotCount = llvm::range_size(forOp.getBody()->getOps<tt::DotOp>());
   if (dotCount != 2) {
-    llvm::outs() << "Reject FA pipeliner\n";
+    LDBG("Does only sypport 2 dots");
     return failure();
   }
 
   if (!useAsyncCopy) {
-    llvm::outs() << "Only works with AsyncCopy!\n";
+    LDBG("Only works with AsyncCopy!");
     return failure();
   }
 
   if (numStages != 4) {
-    llvm::outs() << "Only works with num_stages==4\n";
+    LDBG("Only works with num_stages==4");
     return failure();
   }
 
   // Four stage pipeliner
 
-  llvm::outs() << "Pipeline FA!\n";
+  LDBG("Use four stage pipeliner");
 
   tt::PipeliningOption options;
   options.supportDynamicLoops = true;
@@ -1428,10 +1422,8 @@ struct PipelinePass : impl::TritonAMDGPUStreamPipelineBase<PipelinePass> {
       if (succeeded(fourStagePipelineLoop(
               forOp, tt::getNumStagesOrDefault(forOp, numStages),
               useAsyncCopy))) {
-        llvm::outs() << "Done FA pipelining\n";
         continue;
       }
-      llvm::outs() << "Failed to fa pipeline\n";
       (void)streamPipelineLoop(forOp,
                                tt::getNumStagesOrDefault(forOp, numStages),
                                globalPrefetch, localPrefetch, useAsyncCopy);
