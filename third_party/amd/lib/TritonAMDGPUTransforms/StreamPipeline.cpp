@@ -786,7 +786,8 @@ SmallVector<std::pair<Operation *, Value>> fourStageCreateAndScheduleStreamOps(
     if (!info.sharedEncoding)
       continue;
 
-    // Create an allocation that can hold distance number of loadOp shapes.
+    // Create an allocation that can hold distance nu/betweember of loadOp
+    // shapes.
     builder.setInsertionPoint(forOp);
     auto ty = cast<RankedTensorType>(loadOp->getResultTypes()[0]);
     SmallVector<int64_t> bufferShape(ty.getShape());
@@ -844,16 +845,23 @@ SmallVector<std::pair<Operation *, Value>> fourStageCreateAndScheduleStreamOps(
   return loadToAllocs;
 }
 
-void fourStageScheduleOpsBetweenDots(scf::ForOp forOp,
-                                     tt::CoarseSchedule &schedule) {
+void fourStageScheduleOpsBetweenDots(
+    scf::ForOp forOp, tt::CoarseSchedule &schedule,
+    const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
+        &clusters) {
   auto dotOps = llvm::to_vector(forOp.getBody()->getOps<tt::DotOp>());
   auto it = forOp.getBody()->getOps<tt::DotOp>();
 
   auto [dot1Stage, dot1Cluster] = schedule[dotOps[0]];
   auto [dot2Stage, dot2Cluster] = schedule[dotOps[1]];
 
-  // Walk along use-chain of dot1 towards dot2 and label ops by distance
+  // Walk along use-chain of dot1 towards dot2 and label ops by distance. Note
+  // that this will also label uses not feeding into the second op. We remove
+  // them in a cleanup afterwards
   llvm::MapVector<Value, int> opToDistance;
+  llvm::MapVector<Value, int> cleanedOpToDistance;
+
+  llvm::SmallVector<Value> leaves;
 
   SmallVector<Value> queue = {dotOps[0]};
   opToDistance[dotOps[0]] = 0;
@@ -861,22 +869,138 @@ void fourStageScheduleOpsBetweenDots(scf::ForOp forOp,
     auto v = queue.pop_back_val();
     assert(opToDistance.contains(v));
     auto distance = opToDistance[v];
+    bool addedUser = false;
     for (Operation *user : v.getUsers()) {
-      if (user == dotOps[1]) {
+      if (user->getNumResults() == 0)
         continue;
-      }
       // TODO we should probably do a min or max here or store a set of
       // distances per OP?
-      llvm::outs() << "User: " << *user << "\n";
-      llvm::outs().flush();
-      opToDistance[user->getResult(0)] = distance + 1;
-      queue.push_back(user->getResult(0));
+      // Iterate over all results?
+      // llvm::outs() << "User: " << *user << "\n";
+      // llvm::outs().flush();
+      int newDistance = distance + 1;
+      auto storedDistance = opToDistance.find(user->getResult(0));
+      if (storedDistance != opToDistance.end()) {
+        newDistance = std::min(newDistance, storedDistance->second);
+      }
+      opToDistance[user->getResult(0)] = newDistance;
+
+      if (user != dotOps[1]) {
+        addedUser = true;
+        queue.push_back(user->getResult(0));
+      }
+    }
+    if (!addedUser)
+      leaves.push_back(v);
+  }
+
+  // Cleanup all ops which do not feed into the second dot
+  queue.clear();
+  queue.push_back(dotOps[1]);
+
+  int maxDistance = 0;
+
+  while (!queue.empty()) {
+    auto v = queue.pop_back_val();
+    Operation *defOp = v.getDefiningOp();
+    if (!defOp)
+      continue;
+
+    for (Value operand : defOp->getOperands()) {
+      auto distance = opToDistance.find(operand);
+      if (distance == opToDistance.end())
+        continue;
+      cleanedOpToDistance.insert(*distance);
+      maxDistance = std::max(maxDistance, distance->second);
+      if (operand != dotOps[0])
+        queue.push_back(operand);
     }
   }
 
-  for (auto [v, d] : opToDistance) {
-    llvm::outs() << "Distance " << d << ": " << v << "\n";
+  // For each operand of the second dot we go back and search for a good point
+  // to split it across the two stages. Good points are when we expand/broadcast
+  // so we have to loop carry less stuff. We do not care too much about equal
+  // work in both clusters especially since the second alu cluster gets work
+  // required for things after the dot2
+
+  for (auto operand : dotOps[1]->getOperands()) {
+    if (!opToDistance.contains(operand))
+      continue;
+
+    llvm::outs() << "Check dot operand: " << operand << "\n";
+    // Go along until we find a real alu op
+    // Store the next value to follow and a bool to signal if we have passed a
+    // broadcast/expand_dim so we want to split on the next alu op
+    llvm::SmallVector<std::pair<Value, bool>> queue;
+    queue.push_back({operand, false});
+    while (!queue.empty()) {
+      auto [v, splitOnAlu] = queue.pop_back_val();
+      if (!cleanedOpToDistance.contains(v)) {
+        llvm::outs() << "Found unrelated op to previous dot: " << v << "\n";
+        continue;
+      }
+
+      auto defOp = v.getDefiningOp();
+
+      // If the op has already a schedule we abort this path
+      if (schedule.count(defOp) != 0) {
+        llvm::outs() << "Found op with previous schedule: " << v << "\n";
+        continue;
+      }
+
+      // If we find an arith op we assume it's a ALU op so we cut
+      bool isAluOp = false;
+      isAluOp = isAluOp || defOp->getDialect()->getNamespace() ==
+                                   arith::ArithDialect::getDialectNamespace() &&
+                               !isa<arith::TruncFOp>(defOp);
+      isAluOp = isAluOp || defOp->getDialect()->getNamespace() ==
+                               math::MathDialect::getDialectNamespace();
+
+      if (splitOnAlu && isAluOp) {
+        llvm::outs() << "Found alu op schedule to first alu cluster: " << *defOp
+                     << "\n";
+        schedule.insert(defOp, FS_STAGES::STAGE_ALU1,
+                        clusters[FS_CLUSTERS::ALU1]);
+        continue;
+      }
+      llvm::outs() << "Skip non alu op: " << *defOp << "\n";
+      for (Value op2 : defOp->getOperands()) {
+        queue.push_back({op2, splitOnAlu || !isAluOp});
+      }
+    }
   }
+
+  for (Value leaf : leaves) {
+    llvm::outs() << "Leaves :" << leaf << "\n";
+    auto defOp = leaf.getDefiningOp();
+    if (!defOp || schedule.count(defOp) != 0)
+      continue;
+
+    schedule.insert(defOp, FS_STAGES::STAGE_ALU2, clusters[FS_CLUSTERS::ALU2]);
+  }
+
+  // TODO reserve max distance
+  // llvm::SmallVector<llvm::SmallVector<Value>> distanceGroups;
+  // distanceGroups.resize(maxDistance + 1);
+  // for (auto [v, d] : cleanedOpToDistance) {
+  //   llvm::outs() << "Max vs d: " << maxDistance << ", " << d << "\n";
+  //   assert(d < distanceGroups.size());
+  //   distanceGroups[d].push_back(v);
+  // }
+
+  // for (auto [v, d] : opToDistance) {
+  //   llvm::outs() << "Distance " << d << ": " << v << "\n";
+  // }
+  // for (int d = 0; d < distanceGroups.size(); d++) {
+  //   for (auto v : distanceGroups[d]) {
+  //     llvm::outs() << "Cleaned Distance " << d << ": " << v << "\n";
+  //   }
+  // }
+
+  llvm::outs() << "Sizes: " << opToDistance.size() << " vs "
+               << cleanedOpToDistance.size() << "\n";
+
+  // assert(false);
 }
 
 LogicalResult
@@ -958,22 +1082,23 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
   });
 
   // Convert the loads into shared memory allocations and loads from them.
-  fourStageScheduleOpsBetweenDots(forOp, schedule);
+  fourStageScheduleOpsBetweenDots(forOp, schedule, clusters);
 
-  int c = 2;
-  for (auto reduceOp : forOp.getBody()->getOps<tt::ReduceOp>()) {
-    schedule.insert(reduceOp, c,
-                    clusters[c == 2 ? FS_CLUSTERS::ALU1 : FS_CLUSTERS::ALU2]);
-    c++;
-  }
+  // int c = 2;
+  // for (auto reduceOp : forOp.getBody()->getOps<tt::ReduceOp>()) {
+  //   schedule.insert(reduceOp, c,
+  //                   clusters[c == 2 ? FS_CLUSTERS::ALU1 :
+  //                   FS_CLUSTERS::ALU2]);
+  //   c++;
+  // }
 
-  for (auto exp2Op : forOp.getBody()->getOps<mlir::math::Exp2Op>()) {
-    llvm::outs() << "Found Exp2\n";
-    schedule.insert(exp2Op, 2, clusters[FS_CLUSTERS::ALU1]);
-  }
+  // for (auto exp2Op : forOp.getBody()->getOps<mlir::math::Exp2Op>()) {
+  //   llvm::outs() << "Found Exp2\n";
+  //   schedule.insert(exp2Op, 2, clusters[FS_CLUSTERS::ALU1]);
+  // }
 
   LLVM_DEBUG({
-    LDBG("Coarse schedule after schedule reduction:");
+    LDBG("Coarse schedule after schedule ops between dots:");
     schedule.dump();
   });
 
