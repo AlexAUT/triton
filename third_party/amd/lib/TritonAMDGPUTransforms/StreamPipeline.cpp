@@ -931,7 +931,7 @@ SmallVector<std::pair<Operation *, Value>> fourStageCreateAndScheduleStreamOps(
   return loadToAllocs;
 }
 
-void fourStageScheduleOpsBetweenDots(
+LogicalResult fourStageScheduleOpsBetweenDots(
     scf::ForOp forOp, tt::CoarseSchedule &schedule,
     const std::array<tt::CoarseSchedule::Cluster, FS_CLUSTERS::COUNT>
         &clusters) {
@@ -951,6 +951,7 @@ void fourStageScheduleOpsBetweenDots(
 
   SmallVector<Value> queue = {dotOps[0]};
   opToDistance[dotOps[0]] = 0;
+  bool reachedDot1 = false;
   while (!queue.empty()) {
     auto v = queue.pop_back_val();
     assert(opToDistance.contains(v));
@@ -974,10 +975,17 @@ void fourStageScheduleOpsBetweenDots(
       if (user != dotOps[1]) {
         addedUser = true;
         queue.push_back(user->getResult(0));
+      } else {
+        reachedDot1 = true;
       }
     }
     if (!addedUser)
       leaves.push_back(v);
+  }
+
+  if (!reachedDot1) {
+    LDBG("Second dot has to indirectly consume the result from the first");
+    return failure();
   }
 
   // Cleanup all ops which do not feed into the second dot
@@ -985,23 +993,6 @@ void fourStageScheduleOpsBetweenDots(
   queue.push_back(dotOps[1]);
 
   int maxDistance = 0;
-
-  while (!queue.empty()) {
-    auto v = queue.pop_back_val();
-    Operation *defOp = v.getDefiningOp();
-    if (!defOp)
-      continue;
-
-    for (Value operand : defOp->getOperands()) {
-      auto distance = opToDistance.find(operand);
-      if (distance == opToDistance.end())
-        continue;
-      cleanedOpToDistance.insert(*distance);
-      maxDistance = std::max(maxDistance, distance->second);
-      if (operand != dotOps[0])
-        queue.push_back(operand);
-    }
-  }
 
   // For each operand of the second dot we go back and search for a good point
   // to split it across the two stages. Good points are when we expand/broadcast
@@ -1021,7 +1012,7 @@ void fourStageScheduleOpsBetweenDots(
     queue.push_back({operand, false});
     while (!queue.empty()) {
       auto [v, splitOnAlu] = queue.pop_back_val();
-      if (!cleanedOpToDistance.contains(v)) {
+      if (!opToDistance.contains(v)) {
         LDBG("Found unrelated op to previous dot: " << v);
         continue;
       }
@@ -1064,23 +1055,7 @@ void fourStageScheduleOpsBetweenDots(
     schedule.insert(defOp, FS_STAGES::STAGE_ALU2, clusters[FS_CLUSTERS::ALU2]);
   }
 
-  // TODO reserve max distance
-  // llvm::SmallVector<llvm::SmallVector<Value>> distanceGroups;
-  // distanceGroups.resize(maxDistance + 1);
-  // for (auto [v, d] : cleanedOpToDistance) {
-  //   llvm::outs() << "Max vs d: " << maxDistance << ", " << d << "\n";
-  //   assert(d < distanceGroups.size());
-  //   distanceGroups[d].push_back(v);
-  // }
-
-  // for (auto [v, d] : opToDistance) {
-  //   llvm::outs() << "Distance " << d << ": " << v << "\n";
-  // }
-  // for (int d = 0; d < distanceGroups.size(); d++) {
-  //   for (auto v : distanceGroups[d]) {
-  //     llvm::outs() << "Cleaned Distance " << d << ": " << v << "\n";
-  //   }
-  // }
+  return success();
 }
 
 LogicalResult
@@ -1098,12 +1073,11 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
   if (arch)
     isaFamily = triton::AMD::deduceISAFamily(*arch);
 
-  bool pipelineWithoutDot = forOp->hasAttr(mlir::triton::kNumStagesAttrName);
   bool filterSmallVectors = isaFamily != triton::AMD::ISAFamily::CDNA4;
   llvm::MapVector<Operation *, std::pair<int, Operation *>> loadOpToIndLevel =
-      triton::gpu::loadOpsToIndirectionLevel(forOp, pipelineWithoutDot,
-                                             axisInfoAnalysis, numStages,
-                                             filterSmallVectors);
+      triton::gpu::loadOpsToIndirectionLevel(
+          forOp, /*pipelineWithoutDot=*/false, axisInfoAnalysis, numStages,
+          filterSmallVectors);
 
   if (llvm::any_of(loadOpToIndLevel,
                    [](auto it) { return it.second.first != 0; })) {
@@ -1150,6 +1124,16 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
   });
 
   // Convert the loads into shared memory allocations and loads from them.
+  if (failed(fourStageScheduleOpsBetweenDots(forOp, schedule, clusters))) {
+    return failure();
+  }
+
+  LLVM_DEBUG({
+    LDBG("Coarse schedule after schedule ops between dots:");
+    schedule.dump();
+  });
+
+  // Convert the loads into shared memory allocations and loads from them.
   SmallVector<std::pair<Operation *, Value>> sharedMemAllocs =
       fourStageCreateAndScheduleStreamOps(loadToInfo, forOp, numBuffers,
                                           useAsyncCopy, schedule, clusters,
@@ -1158,27 +1142,6 @@ fourStagePreprocessLoopAndBuildSchedule(scf::ForOp &forOp, int numStages,
   LLVM_DEBUG({
     llvm::dbgs() << "\n";
     LDBG("Coarse schedule stream ops:");
-    schedule.dump();
-  });
-
-  // Convert the loads into shared memory allocations and loads from them.
-  fourStageScheduleOpsBetweenDots(forOp, schedule, clusters);
-
-  // int c = 2;
-  // for (auto reduceOp : forOp.getBody()->getOps<tt::ReduceOp>()) {
-  //   schedule.insert(reduceOp, c,
-  //                   clusters[c == 2 ? FS_CLUSTERS::ALU1 :
-  //                   FS_CLUSTERS::ALU2]);
-  //   c++;
-  // }
-
-  // for (auto exp2Op : forOp.getBody()->getOps<mlir::math::Exp2Op>()) {
-  //   llvm::outs() << "Found Exp2\n";
-  //   schedule.insert(exp2Op, 2, clusters[FS_CLUSTERS::ALU1]);
-  // }
-
-  LLVM_DEBUG({
-    LDBG("Coarse schedule after schedule ops between dots:");
     schedule.dump();
   });
 
@@ -1346,7 +1309,7 @@ LogicalResult fourStagePipelineLoop(scf::ForOp forOp, int numStages,
   // Check if we can 4-stage pipeline loop
   auto dotCount = llvm::range_size(forOp.getBody()->getOps<tt::DotOp>());
   if (dotCount != 2) {
-    LDBG("Does only sypport 2 dots");
+    LDBG("Does only support 2 dots");
     return failure();
   }
 
