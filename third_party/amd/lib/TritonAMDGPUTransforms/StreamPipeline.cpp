@@ -591,8 +591,6 @@ LogicalResult scheduleLoads(const LoadToInfoMap &loadToInfo, int maxDist,
 void scheduleStreamOps(const LoadToStreamOpMap &loadToStreamOp,
                        tt::CoarseSchedule &schedule, const StreamStages &stages,
                        const StreamClusters &clusters) {
-  SmallVector<std::pair<Operation *, Value>> loadToAllocs;
-
   for (auto [l, streamOps] : loadToStreamOp) {
     auto loadOp = dyn_cast<tt::LoadOp>(l);
     if (!loadOp)
