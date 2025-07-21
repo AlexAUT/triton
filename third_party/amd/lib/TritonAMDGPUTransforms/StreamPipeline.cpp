@@ -671,6 +671,7 @@ buildSchedule(scf::ForOp &forOp, int numStages, const LoadToInfoMap &loadToInfo,
 
   return schedule;
 }
+} // namespace singleDotSchedule
 
 LogicalResult pipelineLoop(scf::ForOp forOp, int numStages, int globalPrefetch,
                            int localPrefetch, bool useAsyncCopy,
