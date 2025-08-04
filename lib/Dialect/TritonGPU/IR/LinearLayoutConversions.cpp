@@ -1734,85 +1734,82 @@ LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
 
     StringAttr kOffset = str_attr("offset");
 
-    StringAttr kRegister = StringAttr::get(ctx, "register");
-    StringAttr kLane = StringAttr::get(ctx, "lane");
-    StringAttr kWarp = StringAttr::get(ctx, "warp");
-    StringAttr kBlock = StringAttr::get(ctx, "block");
+    if (true) {
+      StringAttr kRegister = StringAttr::get(ctx, "register");
+      StringAttr kLane = StringAttr::get(ctx, "lane");
+      StringAttr kWarp = StringAttr::get(ctx, "warp");
+      StringAttr kBlock = StringAttr::get(ctx, "block");
 
-    auto standardOutDims = standardOutDimNames(ctx, dstTy.getRank());
+      auto standardOutDims = standardOutDimNames(ctx, dstTy.getRank());
 
-    // We hardcode sharedOrder == hbmOrder
-    unsigned contigSize = dstTy.getShape()[paddedLayout.getOrder()[0]];
-    unsigned nonContigSize = dstTy.getShape()[paddedLayout.getOrder()[1]];
+      // We hardcode sharedOrder == hbmOrder
+      unsigned contigSize = dstTy.getShape()[paddedLayout.getOrder()[0]];
+      unsigned nonContigSize = dstTy.getShape()[paddedLayout.getOrder()[1]];
 
-    // 256x64, contig along 64
-    std::vector<std::vector<int>> offsetBases;
+      // 256x64, contig along 64
+      std::vector<std::vector<int>> offsetBases;
 
-    if (contigSize == 256) {
-      if (nonContigSize == 64) {
-        offsetBases = {
-            {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
-            {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {128, 0},
-        };
-      } else {
-        assert(false);
+      if (contigSize == 256) {
+        if (nonContigSize == 64) {
+          offsetBases = {
+              {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
+              {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {128, 0},
+          };
+        } else {
+          assert(false);
+        }
       }
-    }
-    if (contigSize == 128) {
-      if (nonContigSize == 64) {
-        offsetBases = {
-            {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
-            {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
-        };
-      } else if (nonContigSize == 256) {
-        offsetBases = {
-            {1, 0},  {2, 0},  {4, 0},  {8, 0},  {16, 0},
-            {32, 0}, {64, 0}, {0, 16}, {0, 32}, {0, 1},
-            {0, 2},  {0, 4},  {0, 8},  {0, 64}, {0, 128},
-        };
-      } else {
-        assert(false);
+      if (contigSize == 128) {
+        if (nonContigSize == 64) {
+          offsetBases = {
+              {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
+              {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
+          };
+        } else if (nonContigSize == 256) {
+          offsetBases = {
+              {1, 0},  {2, 0},  {4, 0},  {8, 0},  {16, 0},
+              {32, 0}, {64, 0}, {0, 16}, {0, 32}, {0, 1},
+              {0, 2},  {0, 4},  {0, 8},  {0, 64}, {0, 128},
+          };
+        } else {
+          assert(false);
+        }
       }
-    }
-    if (contigSize == 64) {
-      if (nonContigSize == 256) {
-        offsetBases = {
-            {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {0, 16},
-            {0, 32}, {0, 64}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {0, 128},
-        };
-      } else {
-        assert(false);
+      if (contigSize == 64) {
+        if (nonContigSize == 256) {
+          offsetBases = {
+              {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {0, 16},
+              {0, 32}, {0, 64}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {0, 128},
+          };
+        } else {
+          assert(false);
+        }
       }
+
+      auto transposeBases = [](std::vector<std::vector<int>> &vec) {
+        for (auto &p : vec)
+          std::swap(p[0], p[1]);
+      };
+
+      // auto sharedOrder = triton::gpu::getOrder(dstTy);
+      // triton::gpu::toLinearLayout(dstTy.getShape(), dstTy.getEncoding());
+      auto regOutDims = llvm::to_vector(regLayout.getOutDimNames());
+      if (triton::gpu::getOrder(dstTy)[0] != 1) {
+        transposeBases(offsetBases);
+        std::swap(regOutDims[0], regOutDims[1]);
+      }
+
+      LinearLayout rowSwizzled(
+          {
+              {kOffset, offsetBases},
+          },
+          {regOutDims[0], regOutDims[1]});
+
+      srcToSharedLayout = regLayout.invertAndCompose(rowSwizzled);
+    } else {
+      srcToSharedLayout =
+          regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
     }
-
-    auto transposeBases = [](std::vector<std::vector<int>> &vec) {
-      for (auto &p : vec)
-        std::swap(p[0], p[1]);
-    };
-
-    // auto sharedOrder = triton::gpu::getOrder(dstTy);
-    // triton::gpu::toLinearLayout(dstTy.getShape(), dstTy.getEncoding());
-    auto regOutDims = llvm::to_vector(regLayout.getOutDimNames());
-    if (triton::gpu::getOrder(dstTy)[0] != 1) {
-      transposeBases(offsetBases);
-      std::swap(regOutDims[0], regOutDims[1]);
-    }
-
-    LinearLayout rowSwizzled(
-        {
-            {kOffset, offsetBases},
-        },
-        {regOutDims[0], regOutDims[1]});
-
-    llvm::outs() << "Src: " << regLayout << "\n";
-    llvm::outs() << "Row swizzled: " << rowSwizzled << "\n";
-    srcToSharedLayout = regLayout.invertAndCompose(rowSwizzled);
-    llvm::outs() << "Final pad to smem: " << srcToSharedLayout << "\n";
-
-    // srcToSharedLayout =
-    //     regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
-    // llvm::outs() << "Reg: " << srcLayout << "\nShared: " << srcToSharedLayout
-    //              << "\n";
   } else {
     auto shape = dstTy.getShape();
     auto sharedLL = triton::gpu::toLinearLayout(dstTy);

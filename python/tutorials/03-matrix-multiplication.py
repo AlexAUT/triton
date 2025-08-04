@@ -382,7 +382,7 @@ a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
 b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
 # a = torch.randn((512, 1024), device=DEVICE, dtype=torch.float16)
 # b = torch.randn((512, 1024), device=DEVICE, dtype=torch.float16)
-# b = b.T
+b = b.T
 # a = a.T
 triton_output = matmul(a, b)
 torch_output = torch.matmul(a, b)
@@ -451,6 +451,7 @@ def benchmark(M, N, K, provider, fp8_inputs):
     a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
     b = torch.randn((K, N), device=DEVICE, dtype=torch.float16)
     # a = a.T
+    b = b.T
     if TORCH_HAS_FP8 and fp8_inputs:
         a = a.to(torch.float8_e5m2)
         b = b.T
