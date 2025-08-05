@@ -556,7 +556,8 @@ SmallVector<Value> lowerLdSt(
     const TargetInfoBase &targetInfo, std::optional<int> maybeMaxVecElems,
     std::function<SmallVector<Value>(RewriterBase &, Location, ArrayRef<Value>,
                                      Value, int, VectorType)>
-        lowerInst) {
+        lowerInst,
+    bool forceLane0) {
   auto vals = to_vector(valsArray);
   bool isStore = !vals.empty();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -605,6 +606,14 @@ SmallVector<Value> lowerLdSt(
           loc, rewriter, i8AddrLayout,
           {{kReg, b.i32_val(0)}, {kLane, laneId}, {kWarp, warpId}})[0]
           .second;
+
+  if (forceLane0) {
+    regBaseI8 =
+        applyLinearLayout(
+            loc, rewriter, i8AddrLayout,
+            {{kReg, b.i32_val(0)}, {kLane, b.i32_val(0)}, {kWarp, warpId}})[0]
+            .second;
+  }
 
   // It's fine that we don't compute the offset in bytes as affineOffset
   // will be folded into a constant

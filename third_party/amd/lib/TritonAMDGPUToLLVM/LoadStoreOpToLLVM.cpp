@@ -15,6 +15,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
 
 using namespace mlir;
 using namespace mlir::triton::gpu;
@@ -352,6 +353,7 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     Value tid =
         targetInfo.shuffleIdx(rewriter, loc, getThreadId(rewriter, loc), 0);
     // Value tid = getThreadId(rewriter, loc);
+    Value laneId = getLaneId(rewriter, loc);
     int threadsPerWarp = triton::gpu::lookupThreadsPerWarp(rewriter);
     Value warpSizeVal = b.i32_val(threadsPerWarp);
     Value warpId = b.udiv(tid, warpSizeVal);
@@ -643,6 +645,7 @@ struct BufferLoadToLocalOpConversion
   LogicalResult
   matchAndRewrite(triton::amdgpu::BufferLoadToLocalOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    auto ctx = getContext();
     auto loc = op->getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     LLVM::AMD::BufferEmitter bufferEmitter(rewriter, loc, targetInfo);
@@ -714,44 +717,166 @@ struct BufferLoadToLocalOpConversion
     // based on the collected shared addresses and vector size
     Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
 
-    for (int i = 0; i < ldsWarpStartAddrs.size(); i++) {
-      auto srcIdx = i * vec;
-      auto offsetIn = offsetElems[srcIdx];
-      Value pred = mask ? maskElems[srcIdx] : b.true_val();
-
-      if (hasSwizzling) {
-        // Apply swizzling to the src offsets
-        auto swizzleLaneOffset = swizzledLaneOffsets[i];
-        // laneId + swizzleOffset will always stay inside the warp [0,
-        // threadsPerWarp) because we only swizzle inside a warp
-        Value swizzledLaneId = b.add(laneId, swizzleLaneOffset);
-        // Shuffle based on swizzleLaneId to apply the swizzling
-        offsetIn =
-            targetInfo.shuffleIdx(rewriter, loc, offsetIn, swizzledLaneId);
-
-        if (mask) {
-          pred =
-              shuffleMask(rewriter, b, loc, targetInfo, swizzledLaneId, pred);
-        }
+    if (true) {
+      // zip(src, mask)
+      SmallVector<Value> vals;
+      auto offsetTy = offsetElems[0].getType();
+      auto structTy = LLVM::LLVMStructType::getLiteral(
+          ctx, ArrayRef<Type>{offsetTy, i1_ty});
+      for (int i = 0; i < offsetElems.size(); i++) {
+        Value packedArr = rewriter.create<LLVM::UndefOp>(loc, structTy);
+        packedArr = b.insert_val(packedArr, offsetElems[i], 0);
+        auto maskElem = llMask ? maskElems[i] : b.false_val();
+        packedArr = b.insert_val(packedArr, maskElem, 1);
+        vals.push_back(packedArr);
       }
 
-      auto bufferLoadToLds = bufferEmitter.emitLoadToLds(
-          vecTy, vecBytesVal, rsrcDesc, offsetIn, ldsWarpStartAddrs[i], pred,
-          op.getCache());
-      AMD::addAsyncCopyAliasScope(bufferLoadToLds);
-      if (!otherElems.empty()) {
-        Value storeVal = packElementRangeIntoVector(
-            rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
-        Type ptrTy = ldsWarpStartAddrs[i].getType();
+      // Remove broadcasted registers
+      auto srcLayout = triton::gpu::toLinearLayout(ptrType);
+      // auto removeBroadcastSrc =
+      // triton::actionRemoveBroadcastedRegs(srcLayout); srcLayout =
+      // removeBroadcastSrc.apply(srcLayout); vals =
+      // removeBroadcastSrc.apply(vals);
 
-        // otherDstPtr = warpStartAddr + (laneId + [swizzleLaneOffset]) * vecTy
-        Value ldsAddr = b.gep(ptrTy, vecTy, ldsWarpStartAddrs[i], laneId);
-        if (hasSwizzling)
-          ldsAddr = b.gep(ptrTy, vecTy, ldsAddr, swizzledLaneOffsets[i]);
+      auto freeVarMasks = getFreeVariableMasks(ptrType);
+      Value threadPred =
+          emitRedundantThreadPredicate(freeVarMasks, rewriter, loc, targetInfo);
 
-        llStore(rewriter, loc, ldsAddr, storeVal,
-                b.icmp_ne(maskElems[srcIdx], b.true_val()), op.getCache(),
-                /*forceNoAliasAsyncLoads=*/true);
+      // %dst
+      auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, llDst,
+                                                           resElemTy, rewriter);
+      // auto smemLayout = triton::gpu::toLinearLayout(dstTy);
+      // auto cvt = srcLayout.invertAndCompose(smemLayout);
+      auto cvt = getRegToSharedLayoutForPadding(srcLayout, dstTy);
+      llvm::outs() << "Log cvt: " << cvt << "\n";
+
+      // if (!cvt.isTrivialOver({str_attr("block")})) {
+      //   return emitError(
+      //       loc, "cp.async does not support non-trivial block dimension");
+      // }
+      cvt = cvt.sublayout(
+          {str_attr("register"), str_attr("lane"), str_attr("warp")},
+          {str_attr("offset")});
+      auto affineOffset = smemObj.getShmemOffset(loc, rewriter, dstTy);
+      auto maskSpanAffineOffset = SharedMemoryObject::getMaskSpanOffsets(dstTy);
+
+      int index{};
+
+      auto emitBufferLoadToLds =
+          [&b, &bufferEmitter, &rsrcDesc, &index, &offsetElems, &maskElems,
+           ldsWarpStartAddrs = ldsWarpStartAddrs, threadPred, offsetTy,
+           hasMask = bool(llMask), cache = op.getCache()](
+              RewriterBase &rewriter, Location loc, ArrayRef<Value> vals,
+              Value shmemAddr, int startIdx,
+              VectorType vecTy) -> SmallVector<Value> {
+        assert(isa<VectorType>(vecTy));
+        auto *ctx = rewriter.getContext();
+        auto elemTy = vecTy.getElementType();
+        auto nBytes =
+            vecTy.getNumElements() * elemTy.getIntOrFloatBitWidth() / 8;
+        assert(nBytes == 16 || nBytes == 8 || nBytes == 4);
+        // Tune CG and CA.
+        // CacheModifier srcCacheModifier =
+        //     nBytes == 16 ? CacheModifier::CG : CacheModifier::CA;
+
+        auto structElem = vals[startIdx];
+        auto offsetElem = b.extract_val(offsetTy, structElem, 0);
+        auto maskElem = b.extract_val(i1_ty, structElem, 1);
+
+        int vecBytes =
+            (vecTy.getNumElements() * elemTy.getIntOrFloatBitWidth()) / 8;
+        assert(llvm::isPowerOf2_32(vecBytes));
+        Value vecBytesVal = b.i32_val(vecBytes);
+
+        auto offsetIn = offsetElems[startIdx];
+        Value pred = hasMask ? maskElems[startIdx] : b.true_val();
+
+        auto bufferLoadToLds =
+            bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc,
+                                        offsetElem, shmemAddr, maskElem, cache);
+        AMD::addAsyncCopyAliasScope(bufferLoadToLds);
+        llvm::outs() << "Start index :" << startIdx << "\n";
+        // TODO implement other
+        // if (!otherElems.empty()) {
+        //   Value storeVal =
+        //       packElementRangeIntoVector(rewriter, this->getTypeConverter(),
+        //                                  loc, vecTy, otherElems, srcIdx);
+        //   Type ptrTy = ldsWarpStartAddrs[i].getType();
+
+        //   // otherDstPtr = warpStartAddr + (laneId + [swizzleLaneOffset]) *
+        //   // vecTy
+        //   Value ldsAddr = b.gep(ptrTy, vecTy, ldsWarpStartAddrs[i], laneId);
+        //   if (hasSwizzling)
+        //     ldsAddr = b.gep(ptrTy, vecTy, ldsAddr, swizzledLaneOffsets[i]);
+
+        //   llStore(rewriter, loc, ldsAddr, storeVal,
+        //           b.icmp_ne(maskElems[srcIdx], b.true_val()), op.getCache(),
+        //           /*forceNoAliasAsyncLoads=*/true);
+        // }
+        return {};
+      };
+
+      auto calcPaddedOffset = [&](Value smemOffset) {
+        TritonLLVMOpBuilder b(loc, rewriter);
+        auto bitwidth = resElemTy.getIntOrFloatBitWidth();
+        if (auto paddedLayout = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
+                dstTy.getEncoding())) {
+          // Apply the offset needed for padding.
+          Value padOffset = emitPadding(loc, rewriter, paddedLayout, bitwidth,
+                                        smemOffset, /*offsetInBytes=*/true);
+          smemOffset = b.add(smemOffset, padOffset);
+        }
+        return smemOffset;
+      };
+
+      lowerLdSt(loc, ctx, cvt, vals, resElemTy, smemObj.getBase(),
+                calcPaddedOffset, affineOffset, maskSpanAffineOffset, rewriter,
+                targetInfo, vec, emitBufferLoadToLds, true);
+
+    } else {
+
+      for (int i = 0; i < ldsWarpStartAddrs.size(); i++) {
+        auto srcIdx = i * vec;
+        llvm::outs() << "Src index :" << srcIdx << "\n";
+        auto offsetIn = offsetElems[srcIdx];
+        Value pred = mask ? maskElems[srcIdx] : b.true_val();
+
+        if (hasSwizzling) {
+          // Apply swizzling to the src offsets
+          auto swizzleLaneOffset = swizzledLaneOffsets[i];
+          // laneId + swizzleOffset will always stay inside the warp [0,
+          // threadsPerWarp) because we only swizzle inside a warp
+          Value swizzledLaneId = b.add(laneId, swizzleLaneOffset);
+          // Shuffle based on swizzleLaneId to apply the swizzling
+          offsetIn =
+              targetInfo.shuffleIdx(rewriter, loc, offsetIn, swizzledLaneId);
+
+          if (mask) {
+            pred =
+                shuffleMask(rewriter, b, loc, targetInfo, swizzledLaneId, pred);
+          }
+        }
+
+        auto bufferLoadToLds = bufferEmitter.emitLoadToLds(
+            vecTy, vecBytesVal, rsrcDesc, offsetIn, ldsWarpStartAddrs[i], pred,
+            op.getCache());
+        AMD::addAsyncCopyAliasScope(bufferLoadToLds);
+        if (!otherElems.empty()) {
+          Value storeVal =
+              packElementRangeIntoVector(rewriter, this->getTypeConverter(),
+                                         loc, vecTy, otherElems, srcIdx);
+          Type ptrTy = ldsWarpStartAddrs[i].getType();
+
+          // otherDstPtr = warpStartAddr + (laneId + [swizzleLaneOffset]) *
+          // vecTy
+          Value ldsAddr = b.gep(ptrTy, vecTy, ldsWarpStartAddrs[i], laneId);
+          if (hasSwizzling)
+            ldsAddr = b.gep(ptrTy, vecTy, ldsAddr, swizzledLaneOffsets[i]);
+
+          llStore(rewriter, loc, ldsAddr, storeVal,
+                  b.icmp_ne(maskElems[srcIdx], b.true_val()), op.getCache(),
+                  /*forceNoAliasAsyncLoads=*/true);
+        }
       }
     }
 

@@ -604,7 +604,8 @@ SmallVector<Value> lowerLdSt(
     const TargetInfoBase &targetInfo, std::optional<int> maybeMaxVecElems,
     std::function<SmallVector<Value>(RewriterBase &, Location, ArrayRef<Value>,
                                      Value, int, VectorType)>
-        lowerInst);
+        lowerInst,
+    bool forceLane0 = false);
 
 // Lower local_load/local_store via ld.shared/st.shared
 SmallVector<Value>
