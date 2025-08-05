@@ -1723,8 +1723,7 @@ LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
 
   auto outNames = to_vector(regLayout.getOutDimNames());
   auto order = to_vector(triton::gpu::getOrder(dstTy));
-  auto reorderdNames = applyPermutation(outNames, order);
-  regLayout = regLayout.transposeOuts(reorderdNames);
+  regLayout = regLayout.transposeOuts(applyPermutation(outNames, order));
 
   auto paddedLayout =
       dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(dstTy.getEncoding());
@@ -1807,8 +1806,15 @@ LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
 
       srcToSharedLayout = regLayout.invertAndCompose(rowSwizzled);
     } else {
-      srcToSharedLayout =
-          regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
+      auto shape = llvm::to_vector_of<unsigned>(dstTy.getShape());
+      LinearLayout mappingWithoutPadding = mlir::triton::identityStandardND(
+          kOffset, shape, paddedLayout.getOrder());
+      srcToSharedLayout = regLayout.invertAndCompose(mappingWithoutPadding);
+      // llvm::outs() << ""
+      // srcToSharedLayout =
+      //     regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
+      llvm::outs() << "Reg: " << regLayout
+                   << "\nRowSwizzle: " << srcToSharedLayout << "\n";
     }
   } else {
     auto shape = dstTy.getShape();
