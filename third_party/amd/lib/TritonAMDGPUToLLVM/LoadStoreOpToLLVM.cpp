@@ -717,7 +717,7 @@ struct BufferLoadToLocalOpConversion
     // based on the collected shared addresses and vector size
     Value rsrcDesc = bufferEmitter.createResourceDescriptor(llPtr, llStride);
 
-    if (true) {
+    if (paddedEnc) {
       // zip(src, mask)
       SmallVector<Value> vals;
       auto offsetTy = offsetElems[0].getType();
