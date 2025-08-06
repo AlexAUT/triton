@@ -748,7 +748,7 @@ struct BufferLoadToLocalOpConversion
       // auto smemLayout = triton::gpu::toLinearLayout(dstTy);
       // auto cvt = srcLayout.invertAndCompose(smemLayout);
       auto cvt = getRegToSharedLayoutForPadding(srcLayout, dstTy);
-      llvm::outs() << "Log cvt: " << cvt << "\n";
+      // llvm::outs() << "Log cvt: " << cvt << "\n";
 
       // if (!cvt.isTrivialOver({str_attr("block")})) {
       //   return emitError(
@@ -795,7 +795,7 @@ struct BufferLoadToLocalOpConversion
             bufferEmitter.emitLoadToLds(vecTy, vecBytesVal, rsrcDesc,
                                         offsetElem, shmemAddr, maskElem, cache);
         AMD::addAsyncCopyAliasScope(bufferLoadToLds);
-        llvm::outs() << "Start index :" << startIdx << "\n";
+        // llvm::outs() << "Start index :" << startIdx << "\n";
         // TODO implement other
         // if (!otherElems.empty()) {
         //   Value storeVal =
@@ -837,7 +837,7 @@ struct BufferLoadToLocalOpConversion
 
       for (int i = 0; i < ldsWarpStartAddrs.size(); i++) {
         auto srcIdx = i * vec;
-        llvm::outs() << "Src index :" << srcIdx << "\n";
+        // llvm::outs() << "Src index :" << srcIdx << "\n";
         auto offsetIn = offsetElems[srcIdx];
         Value pred = mask ? maskElems[srcIdx] : b.true_val();
 

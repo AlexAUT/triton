@@ -1813,13 +1813,13 @@ LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
       // llvm::outs() << ""
       // srcToSharedLayout =
       //     regLayout.reshapeOuts({{kOffset, regLayout.getTotalOutDimSize()}});
-      llvm::outs() << "Reg: " << regLayout
-                   << "\nRowSwizzle: " << srcToSharedLayout << "\n";
+      // llvm::outs() << "Reg: " << regLayout
+      //              << "\nRowSwizzle: " << srcToSharedLayout << "\n";
     }
   } else {
     auto shape = dstTy.getShape();
     auto sharedLL = triton::gpu::toLinearLayout(dstTy);
-    llvm::outs() << "Shared: " << sharedLL << "\n";
+    // llvm::outs() << "Shared: " << sharedLL << "\n";
     srcToSharedLayout = regLayout.invertAndCompose(sharedLL);
     // llvm::outs() << "Reg: " << srcLayout << "\nShared: " << sharedLL
     //              << "\nRegToShared: " << srcToSharedLayout << "\n";

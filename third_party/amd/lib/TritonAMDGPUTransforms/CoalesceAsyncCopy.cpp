@@ -68,8 +68,8 @@ struct CoalesceAsyncCopyWrites
 
     if (paddedEnc) {
 
-      llvm::outs() << "Order: " << order[0] << ", " << order[1] << "\n";
-      llvm::outs() << "RegBlocked:\n" << blockedLL << "\n";
+      // llvm::outs() << "Order: " << order[0] << ", " << order[1] << "\n";
+      // llvm::outs() << "RegBlocked:\n" << blockedLL << "\n";
       // LinearLayout reg = triton::identityStandardND(
       //     str_attr("register"), blockedEnc.getSizePerThread(), order);
       // llvm::outs() << "Reg:\n" << reg << "\n";
@@ -81,7 +81,7 @@ struct CoalesceAsyncCopyWrites
 
       unsigned contigDimSize = srcTy.getShape()[paddedEnc.getOrder()[0]];
       unsigned nonContigDimSize = srcTy.getShape()[paddedEnc.getOrder()[1]];
-      llvm::outs() << "Contig size: " << contigDimSize << "\n";
+      // llvm::outs() << "Contig size: " << contigDimSize << "\n";
 
       std::vector<std::vector<int>> regBases;
       std::vector<std::vector<int>> laneBases;
@@ -136,8 +136,8 @@ struct CoalesceAsyncCopyWrites
                                 {standardOutDims[0], standardOutDims[1]});
 
       auto llEnc = ttg::LinearEncodingAttr::get(ctx, paddedLayout);
-      llvm::outs() << "Padding layout: " << paddedLayout << "\n";
-      llvm::outs() << "Encoding: " << llEnc << "\n";
+      // llvm::outs() << "Padding layout: " << paddedLayout << "\n";
+      // llvm::outs() << "Encoding: " << llEnc << "\n";
       auto cvtLL = convertLayout(loc, src, llEnc);
       if (mask)
         mask = convertLayout(loc, mask, llEnc);
