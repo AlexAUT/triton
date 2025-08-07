@@ -446,7 +446,7 @@ LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
   int lastStage = numStages - 1;
   stages[SCHED_GLOBAL_LOAD] = 0;
   stages[SCHED_LOCAL_STORE] = globalPrefetch;
-  stages[SCHED_LOCAL_LOAD] = lastStage - localPrefetch;
+  stages[SCHED_LOCAL_LOAD] = 0;
   stages[SCHED_COMPUTE] = lastStage;
   stages[SCHED_ASYNC_WAIT] = stages[SCHED_LOCAL_LOAD];
 
@@ -527,7 +527,7 @@ LogicalResult initSchedule(int maxDist, Stages &stages, int numStages,
 
   clusters[SCHED_GLOBAL_LOAD] = clusterVec[globalLoadCluster];
   clusters[SCHED_LOCAL_STORE] = clusterVec[localStoreCluster];
-  clusters[SCHED_LOCAL_LOAD] = clusterVec[localLoadCluster];
+  clusters[SCHED_LOCAL_LOAD] = clusterVec[localStoreCluster];
   clusters[SCHED_COMPUTE] = clusterVec[computeCluster];
   clusters[SCHED_ASYNC_WAIT] = clusterVec[asyncWaitCluster];
 
