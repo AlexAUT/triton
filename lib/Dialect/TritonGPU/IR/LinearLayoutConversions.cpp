@@ -1780,6 +1780,11 @@ LinearLayout getRegToSharedLayoutForPadding(LinearLayout regLayout,
               {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {0, 16},
               {0, 32}, {0, 64}, {0, 1}, {0, 2}, {0, 4},  {0, 8},  {0, 128},
           };
+        } else if (nonContigSize == 64) {
+          offsetBases = {
+              {1, 0}, {2, 0},  {4, 0},  {8, 0}, {16, 0}, {32, 0},
+              {0, 8}, {0, 16}, {0, 32}, {0, 1}, {0, 2},  {0, 4},
+          };
         } else {
           assert(false);
         }

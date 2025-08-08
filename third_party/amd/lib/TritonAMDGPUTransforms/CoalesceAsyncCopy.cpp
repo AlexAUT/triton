@@ -113,6 +113,10 @@ struct CoalesceAsyncCopyWrites
           regBases = {{1, 0}, {2, 0}, {4, 0}, {0, 8}, {0, 128}};
           laneBases = {{8, 0}, {16, 0}, {32, 0}, {0, 16}, {0, 32}, {0, 64}};
           warpBases = {{0, 1}, {0, 2}, {0, 4}};
+        } else if (nonContigDimSize == 64) {
+          regBases = {{1, 0}, {2, 0}, {4, 0}};
+          laneBases = {{8, 0}, {16, 0}, {32, 0}, {0, 8}, {0, 16}, {0, 32}};
+          warpBases = {{0, 1}, {0, 2}, {0, 4}};
         } else {
           assert(false);
         }
