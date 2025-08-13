@@ -6,6 +6,7 @@
 #include "third_party/amd/include/Analysis/AxisInfoExt.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/LayoutUtility.h"
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-coalesce-async-copy"
@@ -64,8 +65,15 @@ struct CoalesceAsyncCopyWrites
     // we can only load one element at a time or if the shared encoding is
     // swizzled we cannot exceed the vector size of the swizzling pattern
     LinearLayout regLayout = triton::gpu::toLinearLayout(srcTy);
-    LinearLayout sharedLayout = triton::gpu::toLinearLayout(dstTy);
-    auto regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
+    auto regToSharedLayout = triton::LinearLayout::empty();
+    auto paddedEnc =
+        dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(dstTy.getEncoding());
+    if (paddedEnc) {
+      regToSharedLayout = ttg::getPaddedRegToSharedLayout(regLayout, paddedEnc);
+    } else {
+      auto sharedLayout = triton::gpu::toLinearLayout(dstTy);
+      auto srcToSharedLayout = regLayout.invertAndCompose(sharedLayout);
+    }
     loadContig = std::min<unsigned>(loadContig,
                                     regToSharedLayout.getNumConsecutiveInOut());
 

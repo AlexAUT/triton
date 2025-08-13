@@ -1,6 +1,7 @@
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "amd/lib/TritonAMDGPUToLLVM/Utility.h"
 #include "amd/lib/TritonAMDGPUTransforms/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/LayoutUtility.h"
 
 // This pass updates the waitCount of `AsyncWait` Ops to represent the number of
 // inflight async load operation between the async_wait and the definition of
@@ -33,15 +34,22 @@ namespace {
 // memory.
 int getNumberOfLoadInstructions(RankedTensorType srcTy,
                                 ttg::MemDescType dstTy) {
-  LinearLayout srcLayout = tt::gpu::toLinearLayout(srcTy);
-  LinearLayout sharedLayout = tt::gpu::toLinearLayout(dstTy);
-  LinearLayout srcToSharedLayout = srcLayout.invertAndCompose(sharedLayout);
+  LinearLayout regLayout = triton::gpu::toLinearLayout(srcTy);
+  auto regToSharedLayout = triton::LinearLayout::empty();
+  auto paddedEnc =
+      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(dstTy.getEncoding());
+  if (paddedEnc) {
+    regToSharedLayout = ttg::getPaddedRegToSharedLayout(regLayout, paddedEnc);
+  } else {
+    auto sharedLayout = triton::gpu::toLinearLayout(dstTy);
+    regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
+  }
 
   // On GFX9 we cannot split direct to lds loads into multiple ones because we
   // need coalesced writes. So we can divide the number of registers by the
   // contiguity to get the number of load instructions.
-  int contig = srcToSharedLayout.getNumConsecutiveInOut();
-  int numberOfRegisters = srcToSharedLayout.getInDimSize(
+  int contig = regToSharedLayout.getNumConsecutiveInOut();
+  int numberOfRegisters = regToSharedLayout.getInDimSize(
       StringAttr::get(srcTy.getContext(), "register"));
   int loadInstructionCount = std::max(1, numberOfRegisters / contig);
   return loadInstructionCount;
