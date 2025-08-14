@@ -367,6 +367,11 @@ When vec=2, elements are swizzled in pairs of 2.  In other words, the element at
   let genVerifyDecl = 1;
 }
 
+def LinearLayoutParam : AttrOrTypeParameter<"LinearLayout",
+                                            "linear layout"> {
+  let cppAccessorType = "const LinearLayout &";
+}
+
 def PaddedSharedEncodingAttr
     : TritonGPU_Attr<"PaddedSharedEncoding", "padded_shared_encoding",
                      [SharedEncodingTrait, LayoutEncodingTrait]> {
@@ -422,13 +427,13 @@ attributes too, for example,
       // Order of logical tensor dimensions; fastest-varying first.
       ArrayRefParameter<"unsigned">:$order,
       "CTALayoutAttr":$CTALayout,
-      DefaultValuedParameter<"std::optional<Attribute>", "{}">:$linearComponent
+      DefaultValuedParameter<"std::optional<LinearLayout>", "{}">:$linearComponent
   );
 
   let builders = [
       AttrBuilder<(ins "ArrayRef<std::pair<unsigned, unsigned>>":$intervalPads,
                        "ArrayRef<unsigned>":$order, "CTALayoutAttr":$ctaLayout,
-                       "std::optional<Attribute>":$linearComponent)>,
+                       "std::optional<LinearLayout>":$linearComponent)>,
   ];
 
   let extraClassDeclaration = extraBaseClassDeclaration # [{
@@ -708,11 +713,6 @@ L(T) = [ {0,8} , {1,9} , {2,10}, {3,11}, {0,8} , {1, 9} , {2, 10}, {3, 11},
 //===----------------------------------------------------------------------===//
 // Linear Layout Encoding
 //===----------------------------------------------------------------------===//
-
-def LinearLayoutParam : AttrOrTypeParameter<"LinearLayout",
-                                            "linear layout"> {
-  let cppAccessorType = "const LinearLayout &";
-}
 
 def LinearEncodingAttr : DistributedEncoding<"LinearEncoding", "linear_encoding", [DeclareLayoutEncodingMethods]> {
   let mnemonic = "linear";
