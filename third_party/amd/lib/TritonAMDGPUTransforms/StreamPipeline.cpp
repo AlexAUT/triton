@@ -315,6 +315,13 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
                   },
                   {standardOutDims[0], standardOutDims[1]}};
 
+              // Repeat the tile to match allocation dimensions
+              llvm::SmallDenseMap<StringAttr, int64_t> namedShape;
+              for (auto r = 0; r < srcTy.getRank(); r++) {
+                namedShape[standardOutDims[r]] = srcTy.getShape()[r];
+              }
+              storeLL =
+                  triton::ensureLayoutNotSmallerThan(*storeLL, namedShape);
             } else {
               // ds_read_tr16
               // We pad 4 banks after 1024bytes to avoid bank conflicts
