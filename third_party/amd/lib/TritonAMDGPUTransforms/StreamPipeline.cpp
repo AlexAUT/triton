@@ -11,6 +11,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Schedule.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
@@ -267,12 +268,65 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
           threadNumBytes =
               llvm::alignTo(threadNumBytes,
                             std::max(4u, byteWidth)); // Assume 32-bit per bank
-          // We also need to align with dwordx4 or dword loads
           innerD = llvm::alignTo(innerD, (16 * 64) / byteWidth);
           unsigned paddingInElems = threadNumBytes / byteWidth;
+          // We also need to align with dwordx4 or dword loads
+          // TODO add version for dword loads
+          // 1. We only support double rated mfmas for now
+          std::optional<triton::LinearLayout> storeLL;
+          std::optional<Attribute> loadLL;
+          if (threadNumBytes == 16) {
+            // TODO we have to check contig >= 16bytes
+            // We need to differentiate if we load or load tranpose
+            auto kDim = dotOpEnc.getOpIdx() == 0 ? 1 : 0;
+            bool kContig = sharedOrder[0] == kDim;
+
+            if (true || kContig) {
+              // ds_read_b128
+              // We pad 8 banks after 1024bytes to avoid bank conflicts
+              paddingInElems = 8 * 4;
+              // We load 1024byte per instruction and add padding after
+              innerD = 1024 / byteWidth;
+
+              auto transposeBases = [](std::vector<std::vector<int>> &vec) {
+                for (auto &p : vec)
+                  std::swap(p[0], p[1]);
+              };
+
+              auto *ctx = srcTy.getContext();
+              auto standardOutDims =
+                  triton::standardOutDimNames(ctx, srcTy.getRank());
+
+              // For the LDS layout we simply keep the 128bytes strided by 8
+              // rows contiguous. The rest does not really matter
+              std::vector<std::vector<int>> offsetBases;
+              offsetBases = {
+                  {1, 0}, {2, 0},  {4, 0},  {8, 0}, {16, 0}, {32, 0},
+                  {0, 8}, {0, 16}, {0, 32}, {0, 1}, {0, 2},  {0, 4},
+              };
+
+              if (order[0] != 0) {
+                transposeBases(offsetBases);
+              }
+              StringAttr kOffset = StringAttr::get(ctx, "offset");
+              storeLL = triton::LinearLayout{
+                  {
+                      {kOffset, offsetBases},
+                  },
+                  {standardOutDims[0], standardOutDims[1]}};
+
+            } else {
+              // ds_read_tr16
+              // We pad 4 banks after 1024bytes to avoid bank conflicts
+              paddingInElems = 4 * 4;
+              // We load 1024byte per instruction and add padding after
+              innerD = 1024 / byteWidth;
+            }
+          }
+
           tempAttr = ttg::PaddedSharedEncodingAttr::get(
               loadedValue.getContext(), {{innerD, paddingInElems}}, sharedOrder,
-              ctaLayout, std::nullopt);
+              ctaLayout, storeLL);
         } else {
           tempAttr = ttg::SwizzledSharedEncodingAttr::get(
               loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
@@ -334,7 +388,6 @@ bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
   }
 
   unsigned vecSize = regToSharedLayout.getNumConsecutiveInOut();
-  llvm::outs() << "VecSize: " << vecSize << "\n";
   unsigned elemBitWidth = dstTy.getElementTypeBitWidth();
 
   if (fitToValidDirectToLdsVecSize(vecSize, elemBitWidth, targetInfo) == 0)
