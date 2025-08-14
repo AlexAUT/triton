@@ -21,16 +21,23 @@ CTALayoutAttr permuteCTALayout(MLIRContext *ctx, CTALayoutAttr layout,
 
 LinearLayout getPaddedRegToSharedLayout(const LinearLayout &regLayout,
                                         PaddedSharedEncodingAttr paddedEnc) {
-  auto *ctx = paddedEnc.getContext();
-  auto kOffset = StringAttr::get(ctx, "offset");
-  auto outNames = to_vector(regLayout.getOutDimNames());
-  auto order = paddedEnc.getOrder();
-  // transposeOuts just iterates over out dims so we order them based on the
-  // order from the encoding
-  auto inOrderRegLayout =
-      regLayout.transposeOuts(triton::applyPermutation(outNames, order));
-  return inOrderRegLayout.reshapeOuts(
-      {{kOffset, inOrderRegLayout.getTotalOutDimSize()}});
+  if (paddedEnc.getLinearComponent().has_value()) {
+    llvm::outs() << "Reg layout: " << regLayout << "\n";
+    auto sharedLL = *paddedEnc.getLinearComponent();
+    llvm::outs() << "Shared layout: " << sharedLL << "\n";
+    return regLayout.invertAndCompose(sharedLL);
+  } else {
+    auto *ctx = paddedEnc.getContext();
+    auto kOffset = StringAttr::get(ctx, "offset");
+    auto outNames = to_vector(regLayout.getOutDimNames());
+    auto order = paddedEnc.getOrder();
+    // transposeOuts just iterates over out dims so we order them based on the
+    // order from the encoding
+    auto inOrderRegLayout =
+        regLayout.transposeOuts(triton::applyPermutation(outNames, order));
+    return regLayout.reshapeOuts(
+        {{kOffset, inOrderRegLayout.getTotalOutDimSize()}});
+  }
 }
 
 } // namespace mlir::triton::gpu
