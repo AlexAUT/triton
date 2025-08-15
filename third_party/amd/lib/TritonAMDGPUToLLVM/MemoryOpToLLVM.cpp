@@ -181,10 +181,11 @@ private:
     auto ldsTransLayout = chooseDsReadB64TrLayout(dotEnc, shape, llBitwidth);
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                          llvmElemTy, rewriter);
-    SmallVector<Value> outVals;
-    SmallVector<Value> elemsI32;
+
     mlir::Type retTy = dstTy;
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+#if 0
+    SmallVector<Value> outVals;
     bool valid = emitTransferBetweenRegistersAndShared(
         ldsTransLayout, srcTy, llvmElemTy,
         /*maxVecElems=*/std::nullopt, smemObj, loc, rewriter, targetInfo,
@@ -214,38 +215,107 @@ private:
                   b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
             }
           } else {
-            // pack elements in i32 vectors
             auto numElems = vecTy.getNumElements();
             auto numElemsI32 = (numElems * bitwidth / 32);
             auto i32VecTy = VectorType::get(numElemsI32, i32_ty);
 
             auto dsReadOp =
                 rewriter.create<ROCDL::ds_read_tr8_b64>(loc, i32VecTy, vecAddr);
+            AMD::addLocalLoadNoAliasScope(op, dsReadOp);
+            auto res = b.bitcast(dsReadOp.getResult(), vecTy);
+            Value vecVal = res.getResult();
+            for (int v = 0; v < vecTy.getNumElements(); v++) {
+              outVals.push_back(
+                  b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
+            }
+          }
+        });
+#else
+    auto affineOffset = smemObj.getShmemOffset(loc, rewriter, srcTy);
+    auto maskSpanAffineOffset = smemObj.getMaskSpanOffsets(srcTy);
+    auto calcPaddedOffset = [&](Value smemOffset) {
+      TritonLLVMOpBuilder b(loc, rewriter);
+      auto bitwidth = llvmElemTy.getIntOrFloatBitWidth();
+      if (auto paddedLayout = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
+              srcTy.getEncoding())) {
+        // Apply the offset needed for padding.
+        Value padOffset = emitPadding(loc, rewriter, paddedLayout, bitwidth,
+                                      smemOffset, /*offsetInBytes=*/true);
+        smemOffset = b.add(smemOffset, padOffset);
+      }
+      return smemOffset;
+    };
+
+    auto maxVecElems = 64 / bitwidth;
+
+    LinearLayout cvt = LinearLayout::empty();
+    if (auto paddedSharedEncoding =
+            dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
+                srcTy.getEncoding())) {
+      const auto &sharedLL = paddedSharedEncoding.getLinearComponent();
+      cvt = ldsTransLayout.invertAndCompose(sharedLL);
+    } else {
+      auto sharedLayout = toLinearLayout(srcTy);
+      cvt = ldsTransLayout.invertAndCompose(sharedLayout);
+    }
+
+    cvt = cvt.sublayout(
+        {str_attr("register"), str_attr("lane"), str_attr("warp")},
+        {str_attr("offset")});
+    SmallVector<Value> outVals = lowerLdSt(
+        loc, rewriter.getContext(), cvt, {}, // Input for store, output for load
+        llvmElemTy, smemObj.getBase(), calcPaddedOffset, affineOffset,
+        maskSpanAffineOffset, laneId, warpId, rewriter, targetInfo, maxVecElems,
+        [&](RewriterBase &rewriter, Location loc, ArrayRef<Value> inVals,
+            Value vecAddr, int a, VectorType vecTy) {
+          SmallVector<Value> loadedVals;
+
+          if constexpr (isPackedLoad) {
+            assert(bitwidth == 8);
+            auto numElems = vecTy.getNumElements();
+            auto numElemsI32 = (numElems * bitwidth / 32);
+            auto i32VecTy = VectorType::get(numElemsI32, i32_ty);
+            auto dsReadOp =
+                rewriter.create<ROCDL::ds_read_tr4_b64>(loc, i32VecTy, vecAddr);
+            if constexpr (!isPackedLoad) {
+              AMD::addLocalLoadNoAliasScope(op, dsReadOp);
+            }
+            auto res = b.bitcast(dsReadOp.getResult(), vecTy);
+            Value vecVal = res.getResult();
+            for (int v = 0; v < vecTy.getNumElements(); v++) {
+              loadedVals.push_back(
+                  b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
+            }
+          } else if (bitwidth == 16) {
+            auto dsReadOp =
+                rewriter.create<ROCDL::ds_read_tr16_b64>(loc, vecTy, vecAddr);
             if constexpr (!isPackedLoad) {
               AMD::addLocalLoadNoAliasScope(op, dsReadOp);
             }
             Value vecVal = dsReadOp.getResult();
-            for (auto i = 0; i < numElemsI32; ++i) {
-              elemsI32.push_back(
-                  b.extract_element(i32_ty, vecVal, b.i32_val(i)));
+            for (int v = 0; v < vecTy.getNumElements(); v++) {
+              loadedVals.push_back(
+                  b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
+            }
+          } else {
+            auto numElems = vecTy.getNumElements();
+            auto numElemsI32 = (numElems * bitwidth / 32);
+            auto i32VecTy = VectorType::get(numElemsI32, i32_ty);
+
+            auto dsReadOp =
+                rewriter.create<ROCDL::ds_read_tr8_b64>(loc, i32VecTy, vecAddr);
+            AMD::addLocalLoadNoAliasScope(op, dsReadOp);
+            auto res = b.bitcast(dsReadOp.getResult(), vecTy);
+            Value vecVal = res.getResult();
+            for (int v = 0; v < vecTy.getNumElements(); v++) {
+              loadedVals.push_back(
+                  b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
             }
           }
+
+          return loadedVals;
         });
-
-    // unpack i32 vectors and cast to native type
-    if (bitwidth != 16) {
-      auto numElemsPerVec = 32 / bitwidth;
-      auto vecTy = vec_ty(llvmElemTy, numElemsPerVec);
-      for (int v = 0; v < static_cast<int>(elemsI32.size()); ++v) {
-        auto vec = b.bitcast(elemsI32[v], vecTy);
-        for (int i = 0; i < numElemsPerVec; ++i)
-          outVals.push_back(b.extract_element(llvmElemTy, vec, b.i32_val(i)));
-      }
-
-      retTy = LLVM::LLVMStructType::getLiteral(
-          ctx, SmallVector<Type>(outVals.size(), llvmElemTy));
-    }
-    assert(valid && "Failed to emit LDS transpose load operations");
+#endif
     Value result = packLLElements(loc, typeConverter, outVals, rewriter, retTy);
     rewriter.replaceOp(op, result);
     return success();
