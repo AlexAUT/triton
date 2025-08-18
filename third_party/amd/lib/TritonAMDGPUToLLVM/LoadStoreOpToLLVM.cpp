@@ -726,7 +726,7 @@ struct BufferLoadToLocalOpConversion
       for (int i = 0; i < offsetElems.size(); i++) {
         Value packedArr = rewriter.create<LLVM::UndefOp>(loc, structTy);
         packedArr = b.insert_val(packedArr, offsetElems[i], 0);
-        auto maskElem = llMask ? maskElems[i] : b.false_val();
+        auto maskElem = llMask ? maskElems[i] : b.true_val();
         packedArr = b.insert_val(packedArr, maskElem, 1);
         vals.push_back(packedArr);
       }
@@ -983,7 +983,7 @@ struct AsyncCopyGlobalToLocalOpConversion
       for (int i = 0; i < srcElems.size(); i++) {
         Value packedArr = rewriter.create<LLVM::UndefOp>(loc, structTy);
         packedArr = b.insert_val(packedArr, srcElems[i], 0);
-        auto maskElem = llMask ? maskElems[i] : b.false_val();
+        auto maskElem = llMask ? maskElems[i] : b.true_val();
         packedArr = b.insert_val(packedArr, maskElem, 1);
         vals.push_back(packedArr);
       }
