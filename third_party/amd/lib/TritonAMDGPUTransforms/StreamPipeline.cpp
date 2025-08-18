@@ -275,27 +275,26 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
           // 1. We only support double rated mfmas for now
           std::optional<triton::LinearLayout> storeLL;
           std::optional<Attribute> loadLL;
+          auto transposeBases = [](std::vector<std::vector<int>> &vec) {
+            for (auto &p : vec)
+              std::swap(p[0], p[1]);
+          };
+          auto *ctx = srcTy.getContext();
+          auto standardOutDims =
+              triton::standardOutDimNames(ctx, srcTy.getRank());
+          StringAttr kOffset = StringAttr::get(ctx, "offset");
           if (threadNumBytes == 16) {
             // TODO we have to check contig >= 16bytes
             // We need to differentiate if we load or load tranpose
             auto kDim = dotOpEnc.getOpIdx() == 0 ? 1 : 0;
             bool kContig = sharedOrder[0] == kDim;
 
-            if (true || kContig) {
+            if (kContig) {
               // ds_read_b128
               // We pad 8 banks after 1024bytes to avoid bank conflicts
               paddingInElems = 8 * 4;
               // We load 1024byte per instruction and add padding after
               innerD = 1024 / byteWidth;
-
-              auto transposeBases = [](std::vector<std::vector<int>> &vec) {
-                for (auto &p : vec)
-                  std::swap(p[0], p[1]);
-              };
-
-              auto *ctx = srcTy.getContext();
-              auto standardOutDims =
-                  triton::standardOutDimNames(ctx, srcTy.getRank());
 
               // For the LDS layout we simply keep the 128bytes strided by 8
               // rows contiguous. The rest does not really matter
@@ -308,7 +307,6 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
               if (order[0] != 0) {
                 transposeBases(offsetBases);
               }
-              StringAttr kOffset = StringAttr::get(ctx, "offset");
               storeLL = triton::LinearLayout{
                   {
                       {kOffset, offsetBases},
@@ -328,6 +326,31 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
               paddingInElems = 4 * 4;
               // We load 1024byte per instruction and add padding after
               innerD = 1024 / byteWidth;
+
+              // For the LDS layout we simply keep the 128bytes strided by 8
+              // rows contiguous. The rest does not really matter
+              std::vector<std::vector<int>> offsetBases;
+              offsetBases = {
+                  {1, 0}, {2, 0},  {4, 0},  {8, 0}, {16, 0}, {32, 0},
+                  {0, 8}, {0, 16}, {0, 32}, {0, 1}, {0, 2},  {0, 4},
+              };
+
+              if (order[0] != 0) {
+                transposeBases(offsetBases);
+              }
+              storeLL = triton::LinearLayout{
+                  {
+                      {kOffset, offsetBases},
+                  },
+                  {standardOutDims[0], standardOutDims[1]}};
+
+              // Repeat the tile to match allocation dimensions
+              llvm::SmallDenseMap<StringAttr, int64_t> namedShape;
+              for (auto r = 0; r < srcTy.getRank(); r++) {
+                namedShape[standardOutDims[r]] = srcTy.getShape()[r];
+              }
+              storeLL =
+                  triton::ensureLayoutNotSmallerThan(*storeLL, namedShape);
             }
           }
 
