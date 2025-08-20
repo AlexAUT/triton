@@ -138,22 +138,42 @@ struct CoalesceAsyncCopyWrites
       std::vector<std::vector<int>> regBases;
       std::vector<std::vector<int>> laneBases;
       std::vector<std::vector<int>> warpBases;
-      regBases = {{1, 0}, {2, 0}, {4, 0}};
-      laneBases = {{8, 0}, {16, 0}, {32, 0}, {0, 8}, {0, 16}, {0, 32}};
-      warpBases = {{0, 1}, {0, 2}, {0, 4}};
+
+      // We adjust the global layout so lanes write contiguous into LDS. Note
+      // that we do not look for performance here, so if the shared layout is
+      // inefficient we will produce ineffect IR. The shared layout computations
+      // need to take this into account
+
+      auto *ctx = srcTy.getContext();
+      StringAttr kOffset = StringAttr::get(ctx, "offset");
+
+      int logWarpSize = llvm::Log2_32(64);
+      auto ll = paddedEnc.getLinearComponent();
+      assert(ll.has_value());
+
+      int offsetIndex = 0;
+      int logVecSize = 3;
+      for (; offsetIndex < logVecSize; offsetIndex++) {
+        regBases.push_back(ll->getBasis(kOffset, offsetIndex));
+      }
+      for (; offsetIndex < logVecSize + logWarpSize; offsetIndex++) {
+        laneBases.push_back(ll->getBasis(kOffset, offsetIndex));
+      }
+      int logNumWarps = 3;
+      for (; offsetIndex < logVecSize + logWarpSize + logNumWarps;
+           offsetIndex++) {
+        warpBases.push_back(ll->getBasis(kOffset, offsetIndex));
+      }
+      // Remaining basis are added as reg
+      for (; offsetIndex < ll->getInDimSizeLog2(kOffset); offsetIndex++) {
+        regBases.push_back(ll->getBasis(kOffset, offsetIndex));
+      }
 
       auto transposeBases = [](std::vector<std::vector<int>> &vec) {
         for (auto &p : vec)
           std::swap(p[0], p[1]);
       };
 
-      if (paddedEnc.getOrder()[0] != 0) {
-        transposeBases(regBases);
-        transposeBases(laneBases);
-        transposeBases(warpBases);
-      }
-
-      auto *ctx = srcTy.getContext();
       auto standardOutDims = triton::standardOutDimNames(ctx, srcTy.getRank());
       StringAttr kRegister = StringAttr::get(ctx, "register");
       StringAttr kLane = StringAttr::get(ctx, "lane");
