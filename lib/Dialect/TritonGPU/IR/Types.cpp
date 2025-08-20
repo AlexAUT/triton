@@ -97,7 +97,7 @@ LogicalResult MemDescType::verify(function_ref<InFlightDiagnostic()> emitError,
   }
   // Every dimension but the first (to allow for pipelining) must be a power of
   // 2
-  if (!isa<PaddedSharedEncodingAttr>(encoding) &&
+  if (!isa<PaddedLinearSharedEncodingAttr>(encoding) &&
       llvm::any_of(shape.drop_front(1),
                    [](int64_t dim) { return !llvm::isPowerOf2_64(dim); }))
     return emitError() << "shape must have power-of-2 dimensions; got "

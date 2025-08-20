@@ -19,8 +19,9 @@ CTALayoutAttr permuteCTALayout(MLIRContext *ctx, CTALayoutAttr layout,
       applyPermutation(invOrderUnsigned, layout.getCTAOrder()));
 }
 
-LinearLayout getPaddedRegToSharedLayout(const LinearLayout &regLayout,
-                                        PaddedSharedEncodingAttr paddedEnc) {
+LinearLayout
+getPaddedRegToSharedLayout(const LinearLayout &regLayout,
+                           PaddedLinearSharedEncodingAttr paddedEnc) {
   if (paddedEnc.getLinearComponent().has_value()) {
     llvm::outs() << "Reg layout: " << regLayout << "\n";
     auto sharedLL = *paddedEnc.getLinearComponent();

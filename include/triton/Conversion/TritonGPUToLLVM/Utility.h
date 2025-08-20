@@ -523,7 +523,7 @@ emitIndices(Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
 // - If false, smemOffset and padding are assumed to be scaled by element
 // bitwidth, in which case, `bitwidth` is not used.
 Value emitPadding(Location loc, RewriterBase &rewriter,
-                  triton::gpu::PaddedSharedEncodingAttr layout,
+                  triton::gpu::PaddedLinearSharedEncodingAttr layout,
                   unsigned bitwidth, Value smemOffset, bool offsetInBytes);
 
 // Emits IR to load data from shared memory into registers, or to store data

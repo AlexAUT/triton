@@ -184,8 +184,8 @@ SmallVector<unsigned> getOrder(SharedEncodingTrait layout,
   if (auto swizzledLayout = dyn_cast<SwizzledSharedEncodingAttr>(layout)) {
     return llvm::to_vector(swizzledLayout.getOrder());
   }
-  if (auto paddedEnc = dyn_cast<PaddedSharedEncodingAttr>(layout)) {
-    return llvm::to_vector(paddedEnc.getOrder());
+  if (auto padLLEnc = dyn_cast<PaddedLinearSharedEncodingAttr>(layout)) {
+    return llvm::to_vector(padLLEnc.getOrder());
   }
   if (auto sharedLayout = dyn_cast<NVMMASharedEncodingAttr>(layout)) {
     if (shape.size() == 1) {
@@ -1551,10 +1551,10 @@ void SwizzledSharedEncodingAttr::print(AsmPrinter &printer) const {
 }
 
 //===----------------------------------------------------------------------===//
-// PaddedShared encoding
+// PaddedLinearShared encoding
 //===----------------------------------------------------------------------===//
 
-Attribute PaddedSharedEncodingAttr::parse(AsmParser &parser, Type type) {
+Attribute PaddedLinearSharedEncodingAttr::parse(AsmParser &parser, Type type) {
   // <[
   if (failed(parser.parseLess()) || failed(parser.parseLSquare()))
     return {};
@@ -1672,11 +1672,11 @@ Attribute PaddedSharedEncodingAttr::parse(AsmParser &parser, Type type) {
     maybeLL = triton::LinearLayout(std::move(bases), std::move(outDimNames));
   }
 
-  return parser.getChecked<PaddedSharedEncodingAttr>(
+  return parser.getChecked<PaddedLinearSharedEncodingAttr>(
       parser.getContext(), intervals, paddings, order, *ctaLayout, maybeLL);
 }
 
-void PaddedSharedEncodingAttr::print(AsmPrinter &printer) const {
+void PaddedLinearSharedEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<[";
   llvm::interleaveComma(llvm::zip(getIntervals(), getPaddings()), printer,
                         [&](std::tuple<unsigned, unsigned> intervalPad) {
@@ -1702,7 +1702,7 @@ void PaddedSharedEncodingAttr::print(AsmPrinter &printer) const {
   printer << ">";
 }
 
-LogicalResult PaddedSharedEncodingAttr::verify(
+LogicalResult PaddedLinearSharedEncodingAttr::verify(
     function_ref<InFlightDiagnostic()> emitError, ArrayRef<unsigned> intervals,
     ArrayRef<unsigned> paddings, ArrayRef<unsigned> order,
     CTALayoutAttr ctaLayout, std::optional<LinearLayout> linearComponent) {
@@ -1734,7 +1734,7 @@ LogicalResult PaddedSharedEncodingAttr::verify(
   return verifyLayoutOrder(emitError, order);
 }
 
-PaddedSharedEncodingAttr PaddedSharedEncodingAttr::get(
+PaddedLinearSharedEncodingAttr PaddedLinearSharedEncodingAttr::get(
     MLIRContext *context, ArrayRef<std::pair<unsigned, unsigned>> intervalPads,
     ArrayRef<unsigned> order, CTALayoutAttr ctaLayout,
     std::optional<LinearLayout> linearComponent) {
@@ -1748,7 +1748,8 @@ PaddedSharedEncodingAttr PaddedSharedEncodingAttr::get(
   return get(context, intervals, paddings, order, ctaLayout, linearComponent);
 }
 
-int64_t PaddedSharedEncodingAttr::getPaddedSize(ArrayRef<int64_t> shape) const {
+int64_t
+PaddedLinearSharedEncodingAttr::getPaddedSize(ArrayRef<int64_t> shape) const {
   int64_t unpaddedSize = product(shape);
   int64_t paddingSize = 0;
   for (auto [interval, padding] :

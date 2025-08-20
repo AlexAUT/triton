@@ -144,8 +144,8 @@ private:
       return;
     auto allocType = alloc.getType();
     int64_t numElems = 0;
-    if (auto paddedEnc =
-            dyn_cast<gpu::PaddedSharedEncodingAttr>(allocType.getEncoding())) {
+    if (auto paddedEnc = dyn_cast<gpu::PaddedLinearSharedEncodingAttr>(
+            allocType.getEncoding())) {
       SmallVector<int64_t> unpaddedShape = gpu::getShapePerCTA(allocType);
       numElems = paddedEnc.getPaddedSize(unpaddedShape);
     } else {

@@ -27,8 +27,8 @@ LogicalResult lowerLocalStore(Location loc, MLIRContext *ctx, Value regVal,
   auto kWarp = str_attr("warp");
   auto kOffset = str_attr("offset");
   auto regLayout = toLinearLayout(regTy);
-  auto paddedEnc =
-      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(memDescTy.getEncoding());
+  auto paddedEnc = dyn_cast<triton::gpu::PaddedLinearSharedEncodingAttr>(
+      memDescTy.getEncoding());
   LinearLayout cvt = LinearLayout::empty();
   if (paddedEnc) {
     cvt = getPaddedRegToSharedLayout(regLayout, paddedEnc);
@@ -164,7 +164,8 @@ public:
     auto kWarp = str_attr("warp");
     auto kOffset = str_attr("offset");
     auto regLayout = toLinearLayout(regTy);
-    auto paddedEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedEnc);
+    auto paddedEnc =
+        dyn_cast<triton::gpu::PaddedLinearSharedEncodingAttr>(sharedEnc);
     LinearLayout cvt = LinearLayout::empty();
     if (paddedEnc) {
       cvt = getPaddedRegToSharedLayout(regLayout, paddedEnc);
