@@ -36,8 +36,8 @@ int getNumberOfLoadInstructions(RankedTensorType srcTy,
                                 ttg::MemDescType dstTy) {
   LinearLayout regLayout = triton::gpu::toLinearLayout(srcTy);
   auto regToSharedLayout = triton::LinearLayout::empty();
-  auto paddedEnc =
-      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(dstTy.getEncoding());
+  auto paddedEnc = dyn_cast<triton::gpu::PaddedLinearSharedEncodingAttr>(
+      dstTy.getEncoding());
   if (paddedEnc) {
     regToSharedLayout = ttg::getPaddedRegToSharedLayout(regLayout, paddedEnc);
   } else {

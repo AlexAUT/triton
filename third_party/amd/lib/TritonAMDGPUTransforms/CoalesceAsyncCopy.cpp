@@ -85,15 +85,14 @@ struct CoalesceAsyncCopyWrites
     // swizzled we cannot exceed the vector size of the swizzling pattern
     LinearLayout regLayout = triton::gpu::toLinearLayout(srcTy);
     auto regToSharedLayout = triton::LinearLayout::empty();
-    auto paddedEnc =
-        dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(dstTy.getEncoding());
+    auto paddedEnc = dyn_cast<triton::gpu::PaddedLinearSharedEncodingAttr>(
+        dstTy.getEncoding());
     if (paddedEnc) {
       regToSharedLayout = ttg::getPaddedRegToSharedLayout(regLayout, paddedEnc);
     } else {
       auto sharedLayout = triton::gpu::toLinearLayout(dstTy);
       regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
     }
-    llvm::outs() << "Reg to shared: " << regToSharedLayout << " \n";
     loadContig = std::min<unsigned>(loadContig,
                                     regToSharedLayout.getNumConsecutiveInOut());
 

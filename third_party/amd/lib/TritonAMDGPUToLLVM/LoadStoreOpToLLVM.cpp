@@ -314,8 +314,8 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     LinearLayout srcLayout = triton::gpu::toLinearLayout(srcTy);
 
     auto srcToSharedLayout = LinearLayout::empty();
-    auto paddedEnc =
-        dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(dstTy.getEncoding());
+    auto paddedEnc = dyn_cast<triton::gpu::PaddedLinearSharedEncodingAttr>(
+        dstTy.getEncoding());
 
     if (paddedEnc) {
       srcToSharedLayout =
@@ -494,8 +494,8 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     loadVals = removeBroadcastSrc.apply(loadVals);
 
     auto cvt = triton::LinearLayout::empty();
-    auto paddedEnc =
-        dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(dstTy.getEncoding());
+    auto paddedEnc = dyn_cast<triton::gpu::PaddedLinearSharedEncodingAttr>(
+        dstTy.getEncoding());
     if (paddedEnc) {
       cvt = triton::gpu::getPaddedRegToSharedLayout(srcLayout, paddedEnc);
     } else {
@@ -510,8 +510,9 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     auto calcPaddedOffset = [&](Value smemOffset) {
       TritonLLVMOpBuilder b(loc, rewriter);
       auto bitwidth = dstTy.getElementTypeBitWidth();
-      if (auto paddedLayout = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
-              dstTy.getEncoding())) {
+      if (auto paddedLayout =
+              dyn_cast<triton::gpu::PaddedLinearSharedEncodingAttr>(
+                  dstTy.getEncoding())) {
         // Apply the offset needed for padding.
         Value padOffset = emitPadding(loc, rewriter, paddedLayout, bitwidth,
                                       smemOffset, /*offsetInBytes=*/true);

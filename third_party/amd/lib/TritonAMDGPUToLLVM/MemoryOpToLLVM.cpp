@@ -62,7 +62,7 @@ private:
     }
 
     if (!isa<triton::gpu::SwizzledSharedEncodingAttr,
-             triton::gpu::PaddedSharedEncodingAttr>(srcTy.getEncoding()))
+             triton::gpu::PaddedLinearSharedEncodingAttr>(srcTy.getEncoding()))
       return false;
 
     int rank = dstTy.getRank();

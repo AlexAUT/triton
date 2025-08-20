@@ -354,7 +354,7 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
             }
           }
 
-          tempAttr = ttg::PaddedSharedEncodingAttr::get(
+          tempAttr = ttg::PaddedLinearSharedEncodingAttr::get(
               loadedValue.getContext(), {{innerD, paddingInElems}}, sharedOrder,
               ctaLayout, storeLL);
         } else {
