@@ -283,7 +283,8 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
           auto standardOutDims =
               triton::standardOutDimNames(ctx, srcTy.getRank());
           StringAttr kOffset = StringAttr::get(ctx, "offset");
-          if (threadNumBytes == 16) {
+          // if (threadNumBytes == 16) {
+          {
             // TODO we have to check contig >= 16bytes
             // We need to differentiate if we load or load tranpose
             auto kDim = dotOpEnc.getOpIdx() == 0 ? 1 : 0;
@@ -292,16 +293,18 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
             if (kContig) {
               // ds_read_b128
               // We pad 8 banks after 1024bytes to avoid bank conflicts
-              paddingInElems = 8 * 4;
+              unsigned elemPerBank = 2;
+              paddingInElems = 8 * elemPerBank;
               // We load 1024byte per instruction and add padding after
               innerD = 1024 / byteWidth;
 
               // For the LDS layout we simply keep the 128bytes strided by 8
               // rows contiguous. The rest does not really matter
               std::vector<std::vector<int>> offsetBases;
+
               offsetBases = {
-                  {1, 0}, {2, 0},  {4, 0},  {8, 0}, {16, 0}, {32, 0},
-                  {0, 8}, {0, 16}, {0, 32}, {0, 1}, {0, 2},  {0, 4},
+                  {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
+                  {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
               };
 
               if (order[0] != 0) {
@@ -320,10 +323,11 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
               }
               storeLL =
                   triton::ensureLayoutNotSmallerThan(*storeLL, namedShape);
+              storeLL = triton::ensureLayoutNotLargerThan(*storeLL, namedShape);
             } else {
               // ds_read_tr16
               // We pad 4 banks after 1024bytes to avoid bank conflicts
-              paddingInElems = 4 * 4;
+              paddingInElems = 2 * 8;
               // We load 1024byte per instruction and add padding after
               innerD = 1024 / byteWidth;
 
@@ -331,8 +335,13 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
               // rows contiguous. The rest does not really matter
               std::vector<std::vector<int>> offsetBases;
               offsetBases = {
-                  {1, 0}, {2, 0},  {4, 0},  {8, 0}, {16, 0}, {32, 0},
-                  {0, 8}, {0, 16}, {0, 32}, {0, 1}, {0, 2},  {0, 4},
+                  {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
+                  {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
+              };
+
+              offsetBases = {
+                  {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64, 0},
+                  {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
               };
 
               if (order[0] != 0) {
@@ -351,6 +360,7 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
               }
               storeLL =
                   triton::ensureLayoutNotSmallerThan(*storeLL, namedShape);
+              storeLL = triton::ensureLayoutNotLargerThan(*storeLL, namedShape);
             }
           }
 
@@ -407,8 +417,8 @@ bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
   auto srcShape = dstTy.getShape().take_back(srcTy.getRank());
 
   auto regToSharedLayout = tt::LinearLayout::empty();
-  auto paddedEnc =
-      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(dstTy.getEncoding());
+  auto paddedEnc = dyn_cast<triton::gpu::PaddedLinearSharedEncodingAttr>(
+      dstTy.getEncoding());
   if (paddedEnc) {
     regToSharedLayout =
         tt::gpu::getPaddedRegToSharedLayout(regLayout, paddedEnc);

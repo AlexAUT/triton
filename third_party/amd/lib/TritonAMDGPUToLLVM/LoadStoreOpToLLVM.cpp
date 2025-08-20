@@ -525,6 +525,12 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
     auto affineOffset = smemObj.getShmemOffset(loc, rewriter, dstTy);
     auto maskSpanAffineOffset = SharedMemoryObject::getMaskSpanOffsets(dstTy);
     auto [_, warpId] = getLaneAndWarpId(rewriter, loc);
+    // Value tid =
+    //     targetInfo.shuffleIdx(rewriter, loc, getThreadId(rewriter, loc), 0);
+    // int threadsPerWarp = triton::gpu::lookupThreadsPerWarp(rewriter);
+    // Value warpSizeVal = b.i32_val(threadsPerWarp);
+    // Value warpId = b.udiv(tid, warpSizeVal);
+
     // We pass laneId==0 because GFX9 requires a scalar base pointer into LDS
     lowerLdSt(loc, ctx, cvt, loadVals, resElemTy, smemObj.getBase(),
               calcPaddedOffset, affineOffset, maskSpanAffineOffset,
@@ -779,6 +785,7 @@ struct BufferLoadToLocalOpConversion
     bool hasSwizzling = sharedEnc && sharedEnc.getMaxPhase() != 1;
     if (failed(canWriteCoalesced(rewriter, op, ptrType, dstTy, vec,
                                  hasSwizzling))) {
+      assert(false);
       return failure();
     }
 

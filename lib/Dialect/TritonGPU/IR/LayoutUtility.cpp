@@ -23,9 +23,7 @@ LinearLayout
 getPaddedRegToSharedLayout(const LinearLayout &regLayout,
                            PaddedLinearSharedEncodingAttr paddedEnc) {
   if (paddedEnc.getLinearComponent().has_value()) {
-    llvm::outs() << "Reg layout: " << regLayout << "\n";
     auto sharedLL = *paddedEnc.getLinearComponent();
-    llvm::outs() << "Shared layout: " << sharedLL << "\n";
     return regLayout.invertAndCompose(sharedLL);
   } else {
     auto *ctx = paddedEnc.getContext();
