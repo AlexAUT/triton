@@ -234,16 +234,18 @@ class SwizzledSharedLayout:
 
 class PaddedSharedLayout:
 
-    def __init__(self, interval_padding_pairs, order, ctas_per_cga, cta_split_num, cta_order, linear_component):
+    def __init__(self, interval_padding_pairs, order, ctas_per_cga, cta_split_num, cta_order,
+                 linear_layout_offset_bases=None):
         self.interval_padding_pairs = "[" + ", ".join(f"{v[0]}:{v[1]:+d}" for v in interval_padding_pairs) + "]"
         self.order = order
         self.ctas_per_cga = ctas_per_cga
         self.cta_split_num = cta_split_num
         self.cta_order = cta_order
-        self.linear_component = linear_component
+        self.linear_layout_offset_bases = linear_layout_offset_bases
 
     def __str__(self):
-        return f"#{GPU_DIALECT}.padded_linear_shared<{self.interval_padding_pairs} {{order={self.order}, CTAsPerCGA={self.ctas_per_cga}, CTASplitNum={self.cta_split_num}, CTAOrder={self.cta_order}}}>"
+        ll_str = "" if self.linear_layout_offset_bases is None else f" {{offset={self.linear_layout_offset_bases}}}"
+        return f"#{GPU_DIALECT}.padded_shared<{self.interval_padding_pairs} {{order={self.order}, CTAsPerCGA={self.ctas_per_cga}, CTASplitNum={self.cta_split_num}, CTAOrder={self.cta_order}}}{ll_str}>"
 
 
 class NVMMASharedLayout:
