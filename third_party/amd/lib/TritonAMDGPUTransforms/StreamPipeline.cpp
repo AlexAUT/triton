@@ -10,6 +10,8 @@
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Schedule.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 #include <variant>
@@ -105,7 +107,7 @@ Operation *streamPredication(RewriterBase &rewriter, Operation *op,
 
 struct LoadInfo {
   // Shared layout is used for loads feeding into dot ops.
-  ttg::SwizzledSharedEncodingAttr sharedEncoding = nullptr;
+  ttg::SharedEncodingTrait sharedEncoding = nullptr;
   // The distance of this load's stage to its use' stage.
   int distToUse = 0;
   Operation *use = nullptr;
@@ -211,21 +213,21 @@ ttg::AMDMfmaEncodingAttr getDotEncoding(Value inputValue, unsigned *opIdx) {
 // If all the transitive uses of the given value have are used by a convert to
 // the same dot operand encoding, return true and get the shared encoding that
 // needs to be used to be compatible with users' layouts.
-std::optional<ttg::SwizzledSharedEncodingAttr>
+std::optional<ttg::SharedEncodingTrait>
 getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
-  ttg::SwizzledSharedEncodingAttr attr;
+  ttg::SharedEncodingTrait attr;
   for (Operation *user : loadedValue.getUsers()) {
     LDBG(" getSharedEncIfAllUsersAreDotEnc current user: " << *user);
     if (user->getNumResults() != 1)
       return std::nullopt;
 
-    ttg::SwizzledSharedEncodingAttr tempAttr;
+    ttg::SharedEncodingTrait tempAttr;
     Value userResult = user->getResult(0);
     Type userResType = userResult.getType();
     if (auto memDesc = dyn_cast<ttg::MemDescType>(userResType)) {
       // First time we find a shared encoding in the chain, save it and try to
       // use it if it is compatible with the other users.
-      tempAttr = cast<ttg::SwizzledSharedEncodingAttr>(memDesc.getEncoding());
+      tempAttr = cast<ttg::SharedEncodingTrait>(memDesc.getEncoding());
       if (!getSharedEncIfAllUsersAreDotEnc(userResult).has_value())
         return std::nullopt;
     } else {
@@ -257,6 +259,118 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
         tempAttr = ttg::SwizzledSharedEncodingAttr::get(
             loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
             ctaLayout, bitWidth, /*needTrans=*/false);
+        if (triton::tools::getBoolEnv("TRITON_HIP_USE_PADDED_SHARED_LAYOUT")) {
+          // tempAttr = ttg::PaddedSharedEncodingAttr::get(
+          //     loadedValue.getContext(), {{4 * 2 * 64, 4 * 4}}, sharedOrder,
+          //     srcTy.getShape(), ctaLayout);
+
+          auto kDim = dotOpEnc.getOpIdx() == 0 ? 1 : 0;
+          bool kContig = sharedOrder[0] == kDim;
+
+          if (bitWidth == 16 && dotOpEnc.getKWidth() == 8 && kContig &&
+              order == sharedOrder) {
+            // We expect ds_read_b128 which requires us to pad by 8 banks after
+            // each dwordx4 direct-to-lds load to avoid bank conflcits
+
+            unsigned byteWidth = std::max(bitWidth / 8u, 1u);
+            unsigned elemPerBank = 4 / byteWidth;
+            unsigned padding = 8 * elemPerBank;
+            // TODO lookup threadsPerWarp
+            auto threadsPerWarp = 64;
+            unsigned loadWidth = 16;
+            unsigned elemPerLane = loadWidth / byteWidth;
+            unsigned interval = threadsPerWarp * elemPerLane;
+
+            tempAttr = ttg::PaddedSharedEncodingAttr::get(
+                loadedValue.getContext(), {{interval, padding}}, sharedOrder,
+                srcTy.getShape(), ctaLayout);
+
+            // Compute linear layout which swizzles rows to avoid conflicts when
+            // reading data with ds_read_b128
+
+            auto transposeBases = [](std::vector<std::vector<int>> &vec) {
+              for (auto &p : vec)
+                std::swap(p[0], p[1]);
+            };
+
+            auto *ctx = srcTy.getContext();
+            auto standardOutDims =
+                triton::standardOutDimNames(ctx, srcTy.getRank());
+            StringAttr kOffset = StringAttr::get(ctx, "offset");
+            StringAttr kBlock = StringAttr::get(ctx, "block");
+            std::vector<std::vector<int>> offsetBases;
+
+            offsetBases = {
+                {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {0, 16},
+                {0, 32}, {0, 64}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
+            };
+            if (order[0] != 0) {
+              transposeBases(offsetBases);
+            }
+
+            auto ll =
+                triton::LinearLayout{{{kOffset, offsetBases}}, standardOutDims};
+            llvm::outs() << "LL: " << ll << "\n";
+
+            // Repeat the tile to match allocation dimensions
+            llvm::SmallDenseMap<StringAttr, int64_t> namedShape;
+            for (auto r = 0; r < srcTy.getRank(); r++) {
+              namedShape[standardOutDims[r]] = srcTy.getShape()[r];
+            }
+            ll = triton::ensureLayoutNotSmallerThan(ll, namedShape);
+            llvm::outs() << "LL2: " << ll << "\n";
+            ll = triton::ensureLayoutNotLargerThan(ll, namedShape);
+
+            llvm::outs() << "LL3: " << ll << "\n";
+            ll = triton::gpu::combineCtaCgaWithShape(ll, ctaLayout,
+                                                     srcTy.getShape());
+            llvm::outs() << "LL4: " << ll << "\n";
+
+            tempAttr = ttg::PaddedSharedEncodingAttr::get(
+                loadedValue.getContext(), {{interval, padding}}, ll);
+
+            //   } else {
+            //     // ds_read_tr16
+            //     // We pad 4 banks after 1024bytes to avoid bank conflicts
+            //     paddingInElems = 2 * 8;
+            //     // We load 1024byte per instruction and add padding after
+            //     innerD = 1024 / byteWidth;
+
+            //     // For the LDS layout we simply keep the 128bytes strided by
+            //     8
+            //     // rows contiguous. The rest does not really matter
+            //     std::vector<std::vector<int>> offsetBases;
+            //     offsetBases = {
+            //         {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64,
+            //         0}, {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
+            //     };
+
+            //     offsetBases = {
+            //         {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {64,
+            //         0}, {0, 16}, {0, 32}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
+            //     };
+
+            //     if (order[0] != 0) {
+            //       transposeBases(offsetBases);
+            //     }
+            //     storeLL = triton::LinearLayout{
+            //         {
+            //             {kOffset, offsetBases},
+            //         },
+            //         {standardOutDims[0], standardOutDims[1]}};
+
+            //     // Repeat the tile to match allocation dimensions
+            //     llvm::SmallDenseMap<StringAttr, int64_t> namedShape;
+            //     for (auto r = 0; r < srcTy.getRank(); r++) {
+            //       namedShape[standardOutDims[r]] = srcTy.getShape()[r];
+            //     }
+            //     storeLL =
+            //         triton::ensureLayoutNotSmallerThan(*storeLL, namedShape);
+            //     storeLL = triton::ensureLayoutNotLargerThan(*storeLL,
+            //     namedShape);
+            //   }
+          }
+        }
       } else if (auto llEnc = dyn_cast<ttg::LinearEncodingAttr>(userResEnc)) {
         // We use linear layout directly for scaled dot fp8 operands. For such
         // cases, we need to look further down the def-use chain to find the dot
@@ -299,8 +413,13 @@ bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
   auto regLayout = triton::gpu::toLinearLayout(srcTy);
   // It's the allocation so we trim the multibuffer dimension
   auto srcShape = dstTy.getShape().take_back(srcTy.getRank());
-  auto sharedLayout =
-      triton::gpu::toLinearLayout(srcShape, dstTy.getEncoding());
+  triton::LinearLayout sharedLayout;
+  if (auto paddedEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
+          dstTy.getEncoding())) {
+    sharedLayout = paddedEnc.getLinearComponent();
+  } else {
+    sharedLayout = triton::gpu::toLinearLayout(srcShape, dstTy.getEncoding());
+  }
   auto regToSharedLayout = regLayout.invertAndCompose(sharedLayout);
 
   unsigned vecSize = regToSharedLayout.getNumConsecutiveInOut();
