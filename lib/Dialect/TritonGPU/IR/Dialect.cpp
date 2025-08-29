@@ -1651,26 +1651,27 @@ LogicalResult PaddedSharedEncodingAttr::verify(
     return emitError() << "interval values cannot have duplicates";
 
   const auto &ll = linearComponent;
-  // The linear layout should mape from [offset, block] to [dim0..dimN). All
+  // The linear layout should map from [offset, block] to [dim0..dimN). All
   // bases should be 0 or power of twos and move in a single direction without
   // broadcasting
-  for (auto outDim : ll.getInDimNames()) {
-    if (outDim.str() != "offset" && outDim.str() != "block")
-      return emitError() << "linearComponent must have `offset` and `block` as "
-                            "only input dims, found: "
-                         << outDim.str();
-  }
-  if (ll.getNumInDims() != 2)
-    return emitError() << "linearComponent must have `offset` and `block` as "
-                          "only input dims";
 
-  // outDims are ['dim0', 'dim1', ...]
-  for (auto [i, dim] : llvm::enumerate(ll.getOutDimNames())) {
-    if (dim.str() != ("dim" + llvm::Twine(i)).str()) {
-      return emitError()
-             << "Expected output dimensions to be ['dim0', 'dim1', ...]. Got "
-             << dim << " at position " << i;
-    }
+  if (ll == LinearLayout::empty())
+    return emitError() << "linearComponent cannot be empty";
+
+  assert(!ll.getInDimNames().empty());
+  auto *ctx = ll.getInDimNames().begin()->getContext();
+
+  if (!llvm::equal(ll.getInDimNames(),
+                   std::array{StringAttr::get(ctx, "offset"),
+                              StringAttr::get(ctx, "block")})) {
+    return emitError()
+           << "linearComponent must have [offset, block] as input dims";
+  }
+
+  if (!llvm::equal(ll.getOutDimNames(),
+                   standardOutDimNames(ctx, ll.getNumOutDims()))) {
+    return emitError()
+           << "Expected output dimensions to be ['dim0', 'dim1', ...].";
   }
 
   const auto &bases = ll.getBases();
@@ -1689,11 +1690,10 @@ LogicalResult PaddedSharedEncodingAttr::verify(
         })) {
       return emitError() << "Each offset basis must be 0 or a power of two.";
     }
-    if (!llvm::all_of(dimBases, [&](const auto &basis) {
-          return llvm::count_if(basis, nonZero) != 0;
-        })) {
-      return emitError() << "Broadcasting offset basis are not supported.";
-    }
+  }
+
+  if (!ll.isInvertible()) {
+    return emitError() << "Broadcasting is not supported.";
   }
 
   return success();
@@ -1703,19 +1703,12 @@ PaddedSharedEncodingAttr PaddedSharedEncodingAttr::get(
     MLIRContext *context, ArrayRef<std::pair<unsigned, unsigned>> intervalPads,
     ArrayRef<unsigned> order, ArrayRef<int64_t> shape,
     CTALayoutAttr ctaLayout) {
-  auto rank = shape.size();
-  auto outDimNames = standardOutDimNames(context, rank);
+  auto outDimNames = standardOutDimNames(context, shape.size());
   StringAttr kOffset = StringAttr::get(context, "offset");
 
   // Create identity mapping based on shape and order
-  LinearLayout linearComponent;
-  for (auto dim : order) {
-    linearComponent *=
-        LinearLayout::identity1D(shape[dim], kOffset, outDimNames[dim]);
-  }
-  // Transpose to standard out dim order
-  linearComponent = linearComponent.transposeOuts(outDimNames);
-
+  LinearLayout linearComponent =
+      identityStandardND(kOffset, SmallVector<unsigned>(shape), order);
   linearComponent = combineCtaCgaWithShape(linearComponent, ctaLayout, shape);
 
   return get(context, intervalPads, linearComponent);
