@@ -448,7 +448,7 @@ and `pN` to mean padding:
   let parameters = (ins
       ArrayRefParameter<"unsigned">:$intervals,
       ArrayRefParameter<"unsigned">:$paddings,
-      "LinearLayout":$linearComponent
+      LinearLayoutParam:$linearComponent
   );
 
   let builders = [

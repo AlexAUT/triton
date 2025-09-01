@@ -13,6 +13,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/LinearLayout.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include <memory>
 
 #define DEBUG_TYPE "tritonamdgpu-optimize-dot-operands"
@@ -96,17 +97,30 @@ public:
         directOpIdx = (usedValue == dotOp.getA()) ? 0 : 1;
       }
 
-      if (directDot && transDot)
+      if (directDot && transDot) {
+        LDBG("Escape " << directDot << " and " << transDot);
         break;
+      }
     }
 
-    if (!directDot)
+    LDBG("After1");
+    if (!directDot) {
+      LDBG(loadOp << ", expected a direct tt.dot user");
       return rewriter.notifyMatchFailure(loadOp,
                                          "expected a direct tt.dot user");
-    if (!transDot)
+    }
+    LDBG("After2");
+    if (!transDot) {
+      LDBG(loadOp << ", expected a direct tt.dot user");
       return rewriter.notifyMatchFailure(
           loadOp, "expected a tt.trans feeding a tt.dot user");
+    }
+    LDBG("After3");
     if (directOpIdx != transOpIdx) {
+      LDBG(loadOp << "operand indices of direct and transposed tt.dot users "
+                     "must be "
+                     "the same. Got indices: direct: "
+                  << directOpIdx << " and transposed: " << transOpIdx);
       return rewriter.notifyMatchFailure(loadOp, [&](mlir::Diagnostic &d) {
         d << "operand indices of direct and transposed tt.dot users must be "
              "the same. Got indices: direct: "
@@ -129,17 +143,22 @@ public:
     auto transDotEnc =
         dyn_cast<ttg::DotOperandEncodingAttr>(transOperandType.getEncoding());
 
+    LDBG("After4");
     if (!directDotEnc || !transDotEnc) {
+      LDBG("Wrong encodings: " << directDotEnc << " trans " << transDotEnc);
       return rewriter.notifyMatchFailure(loadOp,
                                          "wrong encodings for tt.dot users");
     }
+    LDBG("After5");
 
     if (directDotEnc.getKWidth() != transDotEnc.getKWidth()) {
+      LDBG("Wrong k width?");
       return rewriter.notifyMatchFailure(loadOp, [&](mlir::Diagnostic &d) {
         d << "kWidths are mismatching. direct: " << directDotEnc.getKWidth()
           << " and transposed: " << transDotEnc.getKWidth();
       });
     }
+    LDBG("After6");
 
     // We need to ensure that the parents of direct and transposed dot encodings
     // are matching in order to get the same shared memory encoding. Note that
@@ -149,6 +168,7 @@ public:
     auto transCTALayout = ttg::getCTALayout(transDotEnc);
 
     if (directCTALayout != transCTALayout) {
+      LDBG("Wrong CTA layout");
       return rewriter.notifyMatchFailure(
           loadOp,
           "CTA layouts of direct and transposed tt.dot users are mismatching");
@@ -156,10 +176,29 @@ public:
 
     auto ctx = getContext();
     auto sharedOrder = ttg::getOrderForMemory(srcTy);
-    auto sharedEnc = ttg::SwizzledSharedEncodingAttr::get(
+    ttg::SharedEncodingTrait sharedEnc = ttg::SwizzledSharedEncodingAttr::get(
         ctx, directDotEnc, directOperandType.getShape(), sharedOrder,
         directCTALayout, directOperandType.getElementType(),
         /*needTrans=*/false);
+
+    if (tools::getBoolEnv("TRITON_HIP_USE_PADDED_SHARED_LAYOUT")) {
+      // Create padded instead of swizzling encoding
+      auto kWidth = directDotEnc.getKWidth();
+      bool kContig = sharedOrder[0] == directDotEnc.getOpIdx() == 0 ? 1 : 0;
+      unsigned bankWidth = 4;
+      // For kContig we read 16 bytes per instruction, for transpose only 8
+      auto bytePadPerRow = bankWidth * (kContig ? 4 : 4); // TODO that's wrong
+      auto elemPadPerRow =
+          bytePadPerRow /
+          std::max(1u, directOperandType.getElementTypeBitWidth() / 8u);
+
+      // Interval is the innerD
+      auto innerElements = directOperandType.getShape()[sharedOrder[0]];
+
+      sharedEnc = ttg::PaddedSharedEncodingAttr::get(
+          ctx, {{innerElements, elemPadPerRow}}, sharedOrder,
+          directOperandType.getShape(), directCTALayout);
+    }
 
     LDBG("Created shared encoding: " << sharedEnc);
     rewriter.setInsertionPointAfter(loadOp);
@@ -183,6 +222,8 @@ public:
       });
       LDBG("Updated cvt op: " << *cvtOp);
     } else {
+      LDBG("Unsupported case");
+      ;
       return rewriter.notifyMatchFailure(loadOp, "currently not supported");
     }
 
@@ -199,6 +240,7 @@ private:
     // unsigned kDimIdx = (opIdx == 0) ? 1 : 0;
     // bool isCDNA4 = (isaFamily == triton::AMD::ISAFamily::CDNA4);
     // bool isKContig = (sharedOrder[0] == kDimIdx);
+    // return isKContig;
     return false;
   }
 

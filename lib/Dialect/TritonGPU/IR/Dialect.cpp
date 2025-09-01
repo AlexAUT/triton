@@ -1730,7 +1730,7 @@ PaddedSharedEncodingAttr PaddedSharedEncodingAttr::get(
 SmallVector<unsigned>
 PaddedSharedEncodingAttr::basesPerDim(StringAttr dimName,
                                       bool skipBroadcast) const {
-  auto ll = getLinearComponent();
+  const auto &ll = getLinearComponent();
   auto rank = ll.getNumOutDims();
   return basesPerDimImpl(ll.getBases(), dimName, rank, skipBroadcast);
 }

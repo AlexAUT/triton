@@ -44,7 +44,7 @@ inline const std::set<std::string> CACHE_INVALIDATING_ENV_VARS = {
     "ALLOW_LHS_TMEM_LAYOUT_CONVERSION",
     "TRITON_F32_DEFAULT",
     "TRITON_PREFER_TMEM_16x256_LAYOUT",
-    // clang-format on
+    "TRITON_HIP_USE_PADDED_SHARED_LAYOUT",
 };
 
 inline const std::set<std::string> CACHE_NEUTRAL_ENV_VARS = {
