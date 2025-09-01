@@ -1670,9 +1670,9 @@ void PaddedSharedEncodingAttr::print(AsmPrinter &printer) const {
                         });
   printer << "] {";
 
-  // We have a short hand form if the linearComponent is:
-  //  1) Does not have a CTA layout (e.g. block is missing)
-  //  2) The offset bases is and idendity mapping
+  // We have a short hand form if linearComponent:
+  //  1) does have an empty CTA layout (empty block dim)
+  //  2) offsets are an identity mapping
   auto kOffset = StringAttr::get(ctx, "offset");
   auto kBlock = StringAttr::get(ctx, "block");
   auto shape = SmallVector<unsigned>(ll.getOutDimSizes());
