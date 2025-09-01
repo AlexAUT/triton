@@ -1602,11 +1602,13 @@ Attribute PaddedSharedEncodingAttr::parse(AsmParser &parser, Type type) {
   if (failed(parser.parseAttribute(attrList)))
     return {};
 
-  // We have 2 possible formats:
+  // We have 2 possible formats for the attr-dict:
   //  1) offset=[..], block=[..] handled by parseLinearLayout
-  //  2) order=[..], shape=[..] which is used to build an identity mapping
+  //  2) order=[..], shape=[..] which creates an identity mapping
+
   std::optional<LinearLayout> maybeLL;
-  if (attrList.contains("offset")) {
+  // Assume it's the first variant if offset or block is defined
+  if (attrList.contains("offset") || attrList.contains("block")) {
     std::vector<std::string> inDimNames = {"offset", "block"};
     // Error out on additional attribute names
     for (const NamedAttribute &attr : attrList) {
@@ -1617,7 +1619,7 @@ Attribute PaddedSharedEncodingAttr::parse(AsmParser &parser, Type type) {
     }
     maybeLL = parseLinearLayout(attrList, parser, inDimNames);
   } else {
-    // Check for second form, order + shape
+    // Parse the second form
     SmallVector<unsigned> order;
     SmallVector<unsigned> shape;
     for (const NamedAttribute &attr : attrList) {
@@ -1634,6 +1636,7 @@ Attribute PaddedSharedEncodingAttr::parse(AsmParser &parser, Type type) {
       }
     }
 
+    // Create identity mapping based on shape and order
     SmallVector<int64_t> shapeI64 = SmallVector<int64_t>(ArrayRef(shape));
     // Create identity mapping based on shape and order
     auto kOffset = StringAttr::get(parser.getContext(), "offset");
@@ -1672,11 +1675,14 @@ void PaddedSharedEncodingAttr::print(AsmPrinter &printer) const {
   //  2) The offset bases is and idendity mapping
   auto kOffset = StringAttr::get(ctx, "offset");
   auto kBlock = StringAttr::get(ctx, "block");
-  bool hasEmptyBlock = ll.hasInDim(kBlock) && ll.getInDimSize(kBlock) == 0;
   auto shape = SmallVector<unsigned>(ll.getOutDimSizes());
-  LinearLayout idendityND = identityStandardND(kOffset, shape, getOrder());
-  if (hasEmptyBlock &&
-      ll.sublayout({kOffset}, to_vector(ll.getOutDimNames())) == idendityND) {
+
+  bool hasEmptyBlock = ll.getInDimSizeLog2(kBlock) == 0;
+
+  LinearLayout identity = identityStandardND(kOffset, shape, getOrder());
+  auto offsetLayout = ll.sublayout({kOffset}, to_vector(ll.getOutDimNames()));
+
+  if (hasEmptyBlock && offsetLayout == identity) {
     printer << "order = [" << ArrayRef(getOrder()) << "], shape = ["
             << ArrayRef(shape) << "]";
   } else {
