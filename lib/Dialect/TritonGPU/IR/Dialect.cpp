@@ -1679,7 +1679,8 @@ void PaddedSharedEncodingAttr::print(AsmPrinter &printer) const {
 
   bool hasEmptyBlock = ll.getInDimSizeLog2(kBlock) == 0;
 
-  LinearLayout identity = identityStandardND(kOffset, shape, getOrder());
+  LinearLayout identity = identityStandardND(kOffset, shape, getOrder())
+                              .transposeOuts(to_vector(ll.getOutDimNames()));
   auto offsetLayout = ll.sublayout({kOffset}, to_vector(ll.getOutDimNames()));
 
   if (hasEmptyBlock && offsetLayout == identity) {
