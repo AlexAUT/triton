@@ -260,10 +260,6 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
             loadedValue.getContext(), dotOpEnc, srcTy.getShape(), sharedOrder,
             ctaLayout, bitWidth, /*needTrans=*/false);
         if (triton::tools::getBoolEnv("TRITON_HIP_USE_PADDED_SHARED_LAYOUT")) {
-          // tempAttr = ttg::PaddedSharedEncodingAttr::get(
-          //     loadedValue.getContext(), {{4 * 2 * 64, 4 * 4}}, sharedOrder,
-          //     srcTy.getShape(), ctaLayout);
-
           auto kDim = dotOpEnc.getOpIdx() == 0 ? 1 : 0;
           bool kContig = sharedOrder[0] == kDim;
 
@@ -274,6 +270,7 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
 
             unsigned byteWidth = std::max(bitWidth / 8u, 1u);
             unsigned elemPerBank = 4 / byteWidth;
+            // TODO: changed based on kWidth/kContig
             unsigned padding = 8 * elemPerBank;
             // TODO lookup threadsPerWarp
             auto threadsPerWarp = 64;
@@ -288,10 +285,7 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
             // Compute linear layout which swizzles rows to avoid conflicts when
             // reading data with ds_read_b128
 
-            auto transposeBases = [](std::vector<std::vector<int>> &vec) {
-              for (auto &p : vec)
-                std::swap(p[0], p[1]);
-            };
+            auto transposeBases = [](std::vector<std::vector<int>> &vec) {};
 
             auto *ctx = srcTy.getContext();
             auto standardOutDims =
@@ -300,12 +294,15 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
             StringAttr kBlock = StringAttr::get(ctx, "block");
             std::vector<std::vector<int>> offsetBases;
 
+            // TODO add the other layouts from the other dev branch
             offsetBases = {
                 {1, 0},  {2, 0},  {4, 0}, {8, 0}, {16, 0}, {32, 0}, {0, 16},
                 {0, 32}, {0, 64}, {0, 1}, {0, 2}, {0, 4},  {0, 8},
             };
+            // Transpose bases to match order
             if (order[0] != 0) {
-              transposeBases(offsetBases);
+              for (auto &b : offsetBases)
+                std::swap(b[0], b[1]);
             }
 
             auto ll =
@@ -318,14 +315,9 @@ getSharedEncIfAllUsersAreDotEnc(Value loadedValue) {
               namedShape[standardOutDims[r]] = srcTy.getShape()[r];
             }
             ll = triton::ensureLayoutNotSmallerThan(ll, namedShape);
-            llvm::outs() << "LL2: " << ll << "\n";
             ll = triton::ensureLayoutNotLargerThan(ll, namedShape);
-
-            llvm::outs() << "LL3: " << ll << "\n";
             ll = triton::gpu::combineCtaCgaWithShape(ll, ctaLayout,
                                                      srcTy.getShape());
-            llvm::outs() << "LL4: " << ll << "\n";
-
             tempAttr = ttg::PaddedSharedEncodingAttr::get(
                 loadedValue.getContext(), {{interval, padding}}, ll);
 
