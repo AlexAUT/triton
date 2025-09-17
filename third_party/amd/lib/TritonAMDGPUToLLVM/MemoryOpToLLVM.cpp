@@ -255,15 +255,46 @@ private:
   const AMD::TargetInfo &targetInfo;
 };
 
+class LocalBarrierOpConversion
+    : public ConvertOpToLLVMPattern<triton::gpu::LocalBarrierOp> {
+public:
+  LocalBarrierOpConversion(const LLVMTypeConverter &converter,
+                           const AMD::TargetInfo &targetInfo,
+                           PatternBenefit benefit = 2)
+      : ConvertOpToLLVMPattern<triton::gpu::LocalBarrierOp>(converter, benefit),
+        targetInfo(targetInfo) {}
+  using OpAdaptor = typename triton::gpu::LocalBarrierOp::Adaptor;
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::LocalBarrierOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isCDNA(targetInfo.getISAFamily()))
+      return failure();
+    constexpr int32_t ldsOnlyBits = ~(0x1f << 8);
+    Location loc = op->getLoc();
+    ROCDL::SWaitcntOp::create(rewriter, loc, ldsOnlyBits);
+    rewriter.replaceOpWithNewOp<ROCDL::SBarrierOp>(op);
+
+    return success();
+  }
+
+private:
+  const AMD::TargetInfo &targetInfo;
+};
+
 } // namespace
 
 void mlir::triton::AMD::populateMemoryOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     const TargetInfo &targetInfo, PatternBenefit benefit) {
   PatternBenefit transBenefit = PatternBenefit(benefit.getBenefit() + 1);
+  PatternBenefit barrierBenefit = PatternBenefit(benefit.getBenefit() + 1);
+
   patterns.add<TransLocalLoadOpConversion<triton::gpu::LocalLoadOp>>(
       typeConverter, targetInfo, transBenefit);
   patterns.add<
       TransLocalLoadOpConversion<triton::amdgpu::LocalLoadPackedTransposedOp>>(
       typeConverter, targetInfo, benefit);
+  patterns.add<LocalBarrierOpConversion>(typeConverter, targetInfo,
+                                         barrierBenefit);
 }
