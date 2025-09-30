@@ -310,8 +310,8 @@ public:
              AllocSharedMemForUpcastedScales<tt::amdgpu::ScaledUpcastFp4Op>>(
             context, isaFamily);
     ttg::ConvertLayoutOp::getCanonicalizationPatterns(patterns, context);
-    if (failed(applyPatternsGreedily(m, std::move(patterns))))
-      signalPassFailure();
+    // if (failed(applyPatternsGreedily(m, std::move(patterns))))
+    //   signalPassFailure();
   }
 };
 

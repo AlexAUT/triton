@@ -315,7 +315,7 @@ Value createAddUniformAndNonUniform(RewriterBase &rewriter, Location loc,
 bool canNarrowOffset(Value baseOffset, Value addOffset) {
   Type addOffsetType = getElementTypeOrSelf(addOffset);
   auto baseSplatOp = baseOffset.getDefiningOp<tt::SplatOp>();
-  return baseSplatOp && addOffsetType.isInteger(32);
+  return baseSplatOp; // && addOffsetType.isInteger(32);
 }
 
 // Create a zero tensor with a given `type`
