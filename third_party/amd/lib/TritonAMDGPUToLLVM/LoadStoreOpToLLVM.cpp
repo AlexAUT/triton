@@ -983,12 +983,8 @@ struct AsyncCopyGlobalToLocalOpConversion
       auto cond = b.and_(threadPred, maybeSwizzledMaskElem);
       auto [loadBlock, afterLoadBlock] = emitBranch(rewriter, loc, cond);
 
-      int32_t cacheModifiers =
-          mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
-              op.getCache(), /*isLoad=*/true, targetInfo);
-
       emitAsyncLoad(rewriter, loc, targetInfo, vecBits, srcElem, shmemAddr,
-                    cacheModifiers);
+                    op.getCache());
 
       rewriter.setInsertionPointToStart(afterLoadBlock);
 
@@ -1014,8 +1010,12 @@ struct AsyncCopyGlobalToLocalOpConversion
 
   void emitAsyncLoad(RewriterBase &rewriter, Location loc,
                      AMD::TargetInfo targetInfo, int vecBits, Value srcPtr,
-                     Value shmemAddr, int cacheModifiers) const {
+                     Value shmemAddr, triton::CacheModifier cacheMod) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
+    int32_t cacheModifiers =
+        mlir::LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
+            cacheMod, /*isLoad=*/true, targetInfo);
+
     if (llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
                            targetInfo.getISAFamily())) {
       auto globalLoadLdsOp = rewriter.create<ROCDL::GlobalLoadLDSOp>(
@@ -1024,6 +1024,10 @@ struct AsyncCopyGlobalToLocalOpConversion
       if (targetInfo.requiresAliasInfoForAsyncOps())
         AMD::addAsyncCopyAliasScope(globalLoadLdsOp);
     } else if (targetInfo.getISAFamily() == ISAFamily::GFX1250) {
+      if (cacheMod != triton::CacheModifier::NONE) {
+        emitRemark(loc) << "cache modifiers not yet implemented on gfx1250";
+      }
+
       std::string intrinsic =
           "llvm.amdgcn.global.load.async.to.lds.b" + std::to_string(vecBits);
       auto globalLoadLdsOp = LLVM::createLLVMIntrinsicCallOp(
