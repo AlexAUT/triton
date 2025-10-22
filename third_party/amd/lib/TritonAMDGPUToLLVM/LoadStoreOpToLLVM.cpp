@@ -524,7 +524,8 @@ struct DirectToLdsLoadConversionBase : public LoadStoreConversionBase {
       }
       return smemOffset;
     };
-    // We pass laneId==0 because GFX9 requires a scalar base pointer into LDS
+    // If we do not support scattering (GFX9) the address should be the start
+    // address (scalar) of the warp
     laneId = targetInfo.supportsDirectToLDSScattering() ? laneId : b.i32_val(0);
     lowerLdSt(loc, ctx, cvt, loadVals, resElemTy, smemObj.getBase(),
               calcPaddedOffset, affineOffset, maskSpanAffineOffset, laneId,

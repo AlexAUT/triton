@@ -26,20 +26,13 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shar
 #smem = #ttg.shared_memory
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.shared = 8192 : i32} {
   // CHECK-LABEL: async_load_strided_into_lds
-  tt.func public @async_load_strided_into_lds_with_swizzle(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32},
-                                %arg2: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
-    // We need the index calculation so AxisAnalysis sees that we can vectorize the load
-    %1 = tt.make_range {end = 32 : i32, start = 0 : i32} : tensor<32xi32, #ttg.slice<{dim = 0, parent = #blocked}>>
-    %2 = tt.expand_dims %1 {axis = 0 : i32} : tensor<32xi32, #ttg.slice<{dim = 0, parent = #blocked}>> -> tensor<1x32xi32, #blocked>
-    %3 = tt.broadcast %2 : tensor<1x32xi32, #blocked> -> tensor<32x32xi32, #blocked>
-    %4 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<32x32x!tt.ptr<f32>, #blocked>
-    %5 = tt.addptr %4, %3 : tensor<32x32x!tt.ptr<f32>, #blocked>, tensor<32x32xi32, #blocked>
-
+  tt.func public @async_load_strided_into_lds_with_swizzle(%arg0: tensor<32x32x!tt.ptr<f32>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>, tt.constancy = dense<[1, 1]> : tensor<2xi32>},
+                                %arg1: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
     // Each thread loads 256 contiguous bits so we split into 2 128bit loads. This was not possible on GFX9
     // Each thread needs to load 8 elements and we load 2 (sizePerThread) per global.load.lds
     // CHECK-COUNT-2: llvm.amdgcn.global.load.async.to.lds.b128
     // CHECK-NOT: llvm.amdgcn.global.load.async.to.lds
-    %6 = ttg.async_copy_global_to_local %5, %arg2 : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+    %6 = ttg.async_copy_global_to_local %arg0, %arg1 : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
     tt.return
   }
 }
