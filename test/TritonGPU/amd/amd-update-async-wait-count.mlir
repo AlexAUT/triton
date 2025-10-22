@@ -395,7 +395,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %5 = ttg.async_copy_global_to_local %ptr, %memDesc : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared, #smem, mutable>
     %51 = ttg.async_commit_group tokens %4, %5
 
-    // Check that we do not take other load types into account (async_tdm_copy vs async_copy)
+    // Check that we do not take other TDM loads into account (they use a different HW counter)
 
     // CHECK: ttg.async_wait {{.*}} {num = 2
     %cw1 = ttg.async_wait %21 {num = 0 : i32}
