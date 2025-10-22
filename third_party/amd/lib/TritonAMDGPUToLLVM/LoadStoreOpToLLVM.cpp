@@ -1028,7 +1028,6 @@ struct AsyncCopyGlobalToLocalOpConversion
       if (cacheMod != triton::CacheModifier::NONE) {
         emitRemark(loc) << "cache modifiers not yet implemented on gfx1250";
       }
-
       std::string intrinsic =
           "llvm.amdgcn.global.load.async.to.lds.b" + std::to_string(vecBits);
       auto globalLoadLdsOp = LLVM::createLLVMIntrinsicCallOp(
