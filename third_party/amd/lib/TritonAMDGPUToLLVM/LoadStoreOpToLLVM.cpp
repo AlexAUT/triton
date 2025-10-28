@@ -1912,7 +1912,8 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
       // interested in those.
 
       // Clamp vmcnt to 6bits; a lower vmcnt will produce a conservative wait
-      unsigned vmCnt = std::min(63u, op.getNum());
+      // TODO (alex): replace op.getNum() with 0 after gluon async_wait refactor
+      unsigned vmCnt = std::min(63u, op.getNumInst().value_or(op.getNum()));
 
       // Extract low and high bits and combine while setting all other bits to 1
       unsigned lowBits = vmCnt & 0xF;
@@ -1925,7 +1926,8 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
     }
     case ISAFamily::GFX1250: {
       // Clamp asyncCnt to 6bits(hw imit); lower means conservative
-      unsigned asyncCnt = std::min(63u, op.getNum());
+      // TODO (alex): replace op.getNum() with 0 after gluon async_wait refactor
+      unsigned asyncCnt = std::min(63u, op.getNumInst().value_or(op.getNum()));
       LLVM::createLLVMIntrinsicCallOp(rewriter, loc,
                                       "llvm.amdgcn.s.wait.asynccnt", {},
                                       {b.i16_val(asyncCnt)});

@@ -44,12 +44,22 @@ def TTG_ConvertLayoutOp : TTG_Op<"convert_layout",
 
 def TTG_AsyncWaitOp : TTG_Op<"async_wait"> {
   let summary = "async wait";
+  let description = [{
+    Waits for `num` outstanding async commit groups. This operation can also consume any number of tokens
+    from commit groups it should wait upon. `num_inst` can be used for more fine-grained synchronization,
+    currently only used in the AMD backend.
+  }];
 
-  let arguments = (ins Variadic<TTG_AsyncToken>:$asyncToken, I32Attr:$num);
+  let arguments = (ins Variadic<TTG_AsyncToken>:$asyncToken, I32Attr:$num, OptionalAttr<I32Attr>:$num_inst);
 
   let results = (outs TTG_AsyncToken:$retToken);
 
   let assemblyFormat = "($asyncToken^)? attr-dict";
+
+  let builders = [
+    OpBuilder<(ins "ValueRange":$asyncToken, "int32_t":$num),
+      [{ build($_builder, $_state, asyncToken, num, IntegerAttr()); }]>,
+  ];
 
   let extraClassDeclaration = [{
     static bool isSupported(int computeCapability) {

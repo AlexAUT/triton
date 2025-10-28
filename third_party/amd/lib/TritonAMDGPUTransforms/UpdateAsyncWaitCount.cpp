@@ -109,10 +109,17 @@ void updateWaitCount(WaitType waitOp,
     waitCnt = std::min(waitCnt, tokenWaitCnt);
   }
 
-  if (waitCnt == std::numeric_limits<int>::max() || waitOp.getNum() == waitCnt)
-    return;
+  // Add a conservative wait if something went wrong
+  if (waitCnt == std::numeric_limits<int>::max())
+    waitCnt = 0;
 
-  rewriter.modifyOpInPlace(waitOp, [&]() { waitOp.setNum(waitCnt); });
+  rewriter.modifyOpInPlace(waitOp, [&]() {
+    if constexpr (std::is_same_v<WaitType, ttg::AsyncWaitOp>) {
+      waitOp.setNumInst(waitCnt);
+    } else {
+      waitOp.setNum(waitCnt);
+    }
+  });
 }
 
 } // anonymous namespace
