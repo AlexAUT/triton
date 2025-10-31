@@ -750,6 +750,8 @@ def AsyncTDMCopyLocalToGlobalOp : TT_AMDGPU_Op<"async_tdm_copy_local_to_global">
     Arg<TTG_MemDescType, "", [MemRead<SharedMemory>]>:$src
   );
 
+  let results = (outs TTG_AsyncToken:$token);
+
   let assemblyFormat = [{
     $desc `[` $indices `]` `from` $src
     attr-dict `:` qualified(type($src)) `->` qualified(type($desc))
