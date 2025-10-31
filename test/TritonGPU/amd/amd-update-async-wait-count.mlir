@@ -416,7 +416,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %2 = ttg.async_copy_global_to_local %ptr, %memDesc : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared, #smem, mutable>
     %21 = ttg.async_commit_group tokens %2
 
-    %3 = amdgpu.async_tdm_copy_global_to_local %tensorDesc[%c0_i32, %c0_i32] into %memDesc, %mask : !tt.tensordesc<tensor<128x16xf16>> -> !ttg.memdesc<128x16xf16, #shared, #smem, mutable>
+    %3 = amdgpu.async_tdm_copy_local_to_global %tensorDesc[%c0_i32, %c0_i32] from %memDesc: !ttg.memdesc<128x16xf16, #shared, #smem, mutable> -> !tt.tensordesc<tensor<128x16xf16>>
 
     %4 = ttg.async_copy_global_to_local %ptr, %memDesc : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared, #smem, mutable>
     %5 = ttg.async_copy_global_to_local %ptr, %memDesc : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared, #smem, mutable>

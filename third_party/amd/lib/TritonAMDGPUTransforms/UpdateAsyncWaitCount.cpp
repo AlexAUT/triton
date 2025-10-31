@@ -277,9 +277,11 @@ void updateWaitCount(WaitType waitOp,
   } else {
     // For AsyncWait we have to count the actual intrinsics instead of
     // ttgir ops. For TDM wait this is not required as each tdm load will emit
-    // exactly one tensor load.
+    // exactly one tensor load so we can keep the count.
     if constexpr (std::is_same_v<WaitType, ttg::AsyncWaitOp>) {
       waitCnt = computeMinCountBackward(waitOp, computeCountForOp);
+    } else {
+      waitCnt = waitOp.getNum();
     }
   }
 
@@ -367,8 +369,9 @@ struct TritonAMDGPUUpdateAsyncWaitCountPass
       IRRewriter builder(waitOp->getContext());
       updateWaitCount(
           waitOp,
-          [](Operation *op) {
-            return isa<triton::amdgpu::AsyncTDMCopyGlobalToLocalOp>(op) ? 1 : 0;
+          [](Operation *op) -> int {
+            return isa<triton::amdgpu::AsyncTDMCopyGlobalToLocalOp,
+                       triton::amdgpu::AsyncTDMCopyLocalToGlobalOp>(op);
           },
           builder);
     }
