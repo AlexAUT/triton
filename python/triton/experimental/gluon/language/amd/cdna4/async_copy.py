@@ -6,7 +6,8 @@ from ..cdna3 import _verify_buffer_ops
 __all__ = [
     "global_load_to_shared",
     "buffer_load_to_shared",
-    "async_wait",
+    "commit_group",
+    "wait_group",
     "load_shared_relaxed",
 ]
 
@@ -118,13 +119,20 @@ def buffer_load_to_shared(dest, ptr, offsets, mask=None, other=None, cache_modif
 
 
 @builtin
-def async_wait(num_outstanding=0, _semantic=None):
+def commit_group(_semantic=None):
     """
-    Wait for outstanding memory operations, this includes normal load like
-    `load` and `buffer_load`, as well as direct load to shared memory
-    like `global_load_to_shared` and `buffer_load_to_shared`.
-    It will block until the number of outstanding memory operations is less than
-    or equal to `num_outstanding`.
+    Commit the current oustanding direct-to-lds operations (global_load_to_shared and buffer_load_to_shared).
+
+    This finalizes a set of direct-to-lds copy operations.
+    """
+    _semantic.builder.create_async_commit_group()
+
+
+@builtin
+def wait_group(num_outstanding=0, _semantic=None):
+    """
+    Wait for outstanding commit groups. It will block until the number of
+    outstanding commit groups is less than or equal to `num_outstanding`.
 
     Args:
         num_outstanding (int): The number of outstanding operations to wait for. Defaults to 0.
