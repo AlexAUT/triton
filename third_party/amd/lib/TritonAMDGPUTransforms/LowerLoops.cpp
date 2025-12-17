@@ -170,7 +170,24 @@ std::optional<ttg::SharedEncodingTrait> getSharedEncIfAllUsersAreDotEnc(
 
       auto srcTy = cast<ttg::TensorOrMemDesc>(loadedValue.getType());
       auto cgaLayout = ttg::getCGALayout(srcTy.getEncoding());
+
       auto order = getOrderForMemory(srcTy);
+      if (useAsyncCopy && !targetInfo.supportsDirectToLDSScattering()) {
+        // For architectures that don't support scattering into LDS we must
+        // ensure that each warp writes a contiguous memory chunk. This requires
+        // the shared memory order to follow the thread order, while preserving
+        // the fastest dimension from the logical order to keep vectorization.
+        auto llEnc =
+            triton::gpu::toLinearEncoding(cast<RankedTensorType>(srcTy));
+        auto logicalOrder = llEnc.getOrder();
+        auto threadOrder = llEnc.getThreadOrder();
+
+        SetVector<unsigned> orderSet;
+        orderSet.insert(logicalOrder[0]);
+        orderSet.insert(threadOrder.begin(), threadOrder.end());
+        order = orderSet.takeVector();
+      }
+
       unsigned bitWidth = srcTy.getElementType().getIntOrFloatBitWidth();
       SmallVector<unsigned> sharedOrder;
       int rank = order.size();
