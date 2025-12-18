@@ -1976,6 +1976,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 
 // -----
 
+// Simple GEMM kernel with a transpose between the local load and the dot
+
 // CHECK-LABEL: pingpong_gemm_with_trans
 // Check that the transpose is placed before the dot
 // CHECK-NS3: scf.for
