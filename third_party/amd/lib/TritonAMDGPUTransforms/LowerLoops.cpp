@@ -318,11 +318,6 @@ bool canBeConvertedToAsyncLoad(unsigned numBuffers, tt::LoadOp loadOp,
     if (vecSize == 0) {
       return false;
     }
-
-    if (!LLVM::AMD::canLoadDirectToLDS(targetInfo, srcTy, sharedEnc, vecSize)) {
-      LDBG("cannot use direct to LDS due to arch constraints");
-      return false;
-    }
   }
 
   // Checks whether the global pointer's contiguity and mask alignment allows
