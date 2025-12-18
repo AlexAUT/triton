@@ -113,7 +113,7 @@ bool canCoalesceWriteIntoSharedMemory(MLIRContext *ctx,
 // consistency.
 bool canLoadDirectToLDS(const triton::AMD::TargetInfo &targetInfo,
                         RankedTensorType srcTy, Attribute dstEnc,
-                        unsigned &vectorSize);
+                        ArrayRef<int64_t> dstAllocShape, unsigned &vectorSize);
 
 // Check if the result of this tl.dot is used as opA or opB of another tl.dot
 // in the same region
