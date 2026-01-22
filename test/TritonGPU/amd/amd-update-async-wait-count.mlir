@@ -400,6 +400,33 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // -----
 
+// Simple case with TDM
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [32, 2], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx950", "ttg.threads-per-warp" = 64 : i32} {
+  // CHECK-LABEL: simple_tdm_waitcnt
+  tt.func public @simple_tdm_waitcnt(%memDesc: !ttg.memdesc<128x16xf16, #shared, #smem, mutable>, %tensorDesc: !tt.tensordesc<tensor<128x16xf16>>, %mask: i1
+  ) {
+    %c0_i32 = arith.constant 0 : i32
+
+    // Each async_tdm_copy only emits a single instruction (-> counts 1)
+    %1 = amdg.async_tdm_copy_global_to_local %tensorDesc[%c0_i32, %c0_i32] into %memDesc, %mask : !tt.tensordesc<tensor<128x16xf16>> -> !ttg.memdesc<128x16xf16, #shared, #smem, mutable>
+    %2 = amdg.async_tdm_copy_global_to_local %tensorDesc[%c0_i32, %c0_i32] into %memDesc, %mask : !tt.tensordesc<tensor<128x16xf16>> -> !ttg.memdesc<128x16xf16, #shared, #smem, mutable>
+
+    // Do not wait on the second tdm => waitcnt 1
+    // CHECK: amdg.async_tdm_wait {{.*}} {num = 1
+    %w1 = amdg.async_tdm_wait %1 {num = 0 : i32}
+    // No async_copies in between => waitcnt 0
+    // CHECK: amdg.async_tdm_wait {{.*}} {num = 0
+    %w2 = amdg.async_tdm_wait %2 {num = 0 : i32}
+    tt.return
+  }
+}
+
+// -----
+
 // Test async_copy_local_to_global on GFX1250
 
 #blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>
@@ -477,10 +504,16 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %5 = ttg.async_copy_global_to_local %ptr, %memDesc : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared, #smem, mutable>
     %51 = ttg.async_commit_group tokens %4, %5
 
-    // Check that we do not take other TDM loads into account (they use a different HW counter)
+    // Check that we do not take other load types into account (async_tdm_copy vs async_copy)
+
+    // CHECK: amdg.async_tdm_wait {{.*}} {num = 1
+    %tw1 = amdg.async_tdm_wait %1 {num = 0 : i32}
 
     // CHECK: amdg.async_wait {{.*}} {num_inst = 2
     %cw1 = ttg.async_wait %21 {num = 0 : i32}
+
+    // CHECK: amdg.async_tdm_wait {{.*}} {num = 0
+    %w2 = amdg.async_tdm_wait %3 {num = 0 : i32}
 
     // CHECK: amdg.async_wait {{.*}} {num_inst = 0
     %cw2 = ttg.async_wait %51 {num = 0 : i32}

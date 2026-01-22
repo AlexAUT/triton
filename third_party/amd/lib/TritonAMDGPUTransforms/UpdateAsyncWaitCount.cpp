@@ -385,6 +385,22 @@ struct TritonAMDGPUUpdateAsyncWaitCountPass
       IRRewriter builder(waitOp->getContext());
       updateWaitCount(waitOp, countAsyncLoadInstructions, builder);
     }
+
+    // amdgpu.AsyncTDMWait should only count async tdm loads
+    SmallVector<triton::amdgpu::AsyncTDMWait> waitTDMOps;
+    getOperation()->walk([&](triton::amdgpu::AsyncTDMWait waitOp) {
+      waitTDMOps.push_back(waitOp);
+    });
+
+    for (auto waitOp : waitTDMOps) {
+      IRRewriter builder(waitOp->getContext());
+      updateWaitCount(
+          waitOp,
+          [](Operation *op) {
+            return isa<triton::amdgpu::AsyncTDMCopyGlobalToLocalOp>(op) ? 1 : 0;
+          },
+          builder);
+    }
   }
 };
 
