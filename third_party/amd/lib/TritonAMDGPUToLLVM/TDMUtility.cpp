@@ -440,6 +440,11 @@ void fillTDMDescriptor(
   Type globalPtrTy = ptr_ty(ctx, 1);
   Type sharedPtrTy = ptr_ty(ctx, 3);
 
+  if (!isRowMajor) {
+    swapTrailingDims(shapePerCTA);
+    swapTrailingDims(offset);
+  }
+
   // Decode the full TDM descriptor to get all values
   auto [srcPtr, tensorShape, tensorStride, decodedBlockShape] =
       decodeTDMDescriptorFull(
@@ -451,11 +456,6 @@ void fillTDMDescriptor(
               ? std::optional<ArrayRef<Value>>(group3.value().get())
               : std::nullopt,
           numDims);
-
-  if (!isRowMajor) {
-    swapTrailingDims(decodedBlockShape);
-    swapTrailingDims(offset);
-  }
 
   auto kMessage = str_attr("message");
   auto kWarp = str_attr("warp");
