@@ -1188,17 +1188,12 @@ SmallVector<unsigned> LinearEncodingAttr::getOrder() const {
 
 LinearLayout LinearEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   auto ll = getLinearLayout();
-  auto canonicalDims = llvm::to_vector(ll.getOutDimNames());
   llvm::SmallDenseMap<StringAttr, int64_t> namedShape;
-  llvm::SmallVector<StringAttr> permutedDims;
-  for (auto dim : getRepOrder()) {
-    permutedDims.push_back(canonicalDims[dim]);
+  auto canonicalDims = llvm::to_vector(ll.getOutDimNames());
+  for (auto dim : getRepOrder())
     namedShape[canonicalDims[dim]] = shape[dim];
-  }
-  ll = ll.transposeOuts(permutedDims);
-  ll = ensureLayoutNotSmallerThan(ll, namedShape);
+  ll = ensureLayoutNotSmallerThan(ll, namedShape, getRepOrder());
   ll = ensureLayoutNotLargerThan(ll, namedShape, /*broadcastRegisters=*/false);
-  ll = ll.transposeOuts(canonicalDims);
   return ll;
 }
 
@@ -2039,7 +2034,7 @@ Attribute PaddedSharedEncodingAttr::parse(AsmParser &parser, Type type) {
     maybeLL = combineCtaCgaWithShape(
         *maybeLL,
         CGAEncodingAttr::get1CTALayout(parser.getContext(), shape.size()),
-        SmallVector<int64_t>(ArrayRef(shape)));
+        SmallVector<int64_t>(ArrayRef(shape)), order);
   }
 
   if (!maybeLL.has_value())
@@ -2180,7 +2175,8 @@ PaddedSharedEncodingAttr PaddedSharedEncodingAttr::get(
   // Create identity mapping based on shape and order
   LinearLayout linearComponent = identityStandardND(
       kOffset, llvm::to_vector_of<unsigned>(shapePerCTA), order);
-  linearComponent = combineCtaCgaWithShape(linearComponent, cgaLayout, shape);
+  linearComponent =
+      combineCtaCgaWithShape(linearComponent, cgaLayout, shape, order);
 
   return get(context, intervalPads, std::move(linearComponent));
 }

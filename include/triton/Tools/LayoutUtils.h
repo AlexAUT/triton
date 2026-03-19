@@ -69,21 +69,24 @@ ensureLayoutNotLargerThan(const LinearLayout &layout,
 // along its most-minor dimension ("register" for register layouts, "offset" for
 // shared layouts).
 //
-// This function is invariant to the order of the layout's input dimensions, but
-// it cares about the order of the output dims, which should be minor-to-major.
+// `order` specifies the minor-to-major dimension ordering as positions into the
+// layout's getOutDimNames(): order[0] is the position of the most-minor
+// dimension, which gets extended first with the lowest-order input bits.  The
+// function temporarily reorders the output dims per `order`, extends, then
+// restores the original ordering.
 LinearLayout ensureLayoutNotSmallerThan(
     const LinearLayout &layout,
-    const llvm::SmallDenseMap<StringAttr, int64_t> &shape);
+    const llvm::SmallDenseMap<StringAttr, int64_t> &shape,
+    ArrayRef<unsigned> order);
 
-inline LinearLayout
-ensureLayoutNotSmallerThan(const LinearLayout &layout,
-                           const llvm::ArrayRef<StringAttr> dimNames,
-                           const llvm::ArrayRef<int64_t> shape) {
+inline LinearLayout ensureLayoutNotSmallerThan(
+    const LinearLayout &layout, const llvm::ArrayRef<StringAttr> dimNames,
+    const llvm::ArrayRef<int64_t> shape, ArrayRef<unsigned> order) {
   llvm::SmallDenseMap<StringAttr, int64_t> namedDims;
   for (auto [dimName, length] : llvm::zip_equal(dimNames, shape))
     namedDims[dimName] = length;
   assert(namedDims.size() == shape.size() && "duplicate dimension names given");
-  return ensureLayoutNotSmallerThan(layout, namedDims);
+  return ensureLayoutNotSmallerThan(layout, namedDims, order);
 }
 
 // Return a vector of the standard out dimension names for tensor layouts. These

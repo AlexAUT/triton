@@ -51,7 +51,7 @@ DistributedEncodingTrait getWarpLocalEncoding(MLIRContext *ctx, unsigned size,
   // Order of multiplication matters: linearly map along registers first.
   LinearLayout ll = llReg * llLane * llWarp * llBlock;
   ll = ensureLayoutNotLargerThan(ll, {{d0, size}});
-  ll = ensureLayoutNotSmallerThan(ll, {{d0, size}});
+  ll = ensureLayoutNotSmallerThan(ll, {{d0, size}}, {0});
 
   return LinearEncodingAttr::get(ctx, ll);
 }
@@ -82,7 +82,7 @@ getWarpLocalEncoding(MLIRContext *ctx, unsigned buffers, unsigned barriers,
 
   LinearLayout ll = llReg * llLane * llWarp * llBlock;
   ll = ensureLayoutNotLargerThan(ll, {{d0, buffers}, {d1, barriers}});
-  ll = ensureLayoutNotSmallerThan(ll, {{d0, buffers}, {d1, barriers}});
+  ll = ensureLayoutNotSmallerThan(ll, {{d0, buffers}, {d1, barriers}}, {1, 0});
 
   return LinearEncodingAttr::get(ctx, ll);
 }

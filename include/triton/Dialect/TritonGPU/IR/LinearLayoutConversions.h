@@ -87,9 +87,12 @@ LinearLayout getLayoutWithinBlock(const LinearLayout &layout);
 //
 // See the nomenclature note at the top of LinearLayoutConversions.cpp for why
 // the variable with type CGAEncodingAttr is called cgaLayoutAttr.
+// `order` is the minor-to-major dimension ordering in terms of standard dim
+// indices: order[0] is the index of the most-minor dimension.
 LinearLayout combineCtaCgaWithShape(LinearLayout ctaLayout,
                                     CGAEncodingAttr cgaLayoutAttr,
-                                    ArrayRef<int64_t> shape);
+                                    ArrayRef<int64_t> shape,
+                                    ArrayRef<unsigned> order);
 
 LinearLayout chooseWmmaCTALinearLayout(MLIRContext *ctx, unsigned rank,
                                        ArrayRef<unsigned> warpsPerCTA,

@@ -343,8 +343,10 @@ static ttg::PaddedSharedEncodingAttr composePaddedLayoutForAsyncCopyCDNA4(
           {StringAttr::get(ctx, "offset"), bases},
       },
       triton::standardOutDimNames(ctx, rank));
+  unsigned contigDimIdx = isKContig ? kDimIndex : (1 - kDimIndex);
+  SmallVector<unsigned> extOrder = {contigDimIdx, 1 - contigDimIdx};
   linearComponent = triton::gpu::combineCtaCgaWithShape(
-      linearComponent, cgaLayout, srcTy.getShape());
+      linearComponent, cgaLayout, srcTy.getShape(), extOrder);
 
   return ttg::PaddedSharedEncodingAttr::get(ctx, {{paddingInterval, padding}},
                                             std::move(linearComponent));

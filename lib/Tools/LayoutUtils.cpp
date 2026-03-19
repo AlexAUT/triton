@@ -93,17 +93,12 @@ ensureLayoutNotLargerThan(const LinearLayout &layout,
                       /*requireSurjective=*/false);
 }
 
-// For each out-dim d, ensure the layout's out-size (i.e. its codomain) is no
-// smaller than shape[d].  Do this by increasing the size of the layout's inputs
-// along its most-minor dimension ("register" for register layouts, "offset" for
-// shared layouts).
-//
-// This function is invariant to the order of the layout's input dimensions, but
-// it cares about the order of the output dims, which should be minor-to-major.
 LinearLayout ensureLayoutNotSmallerThan(
     const LinearLayout &layout,
-    const llvm::SmallDenseMap<StringAttr, int64_t> &shape) {
+    const llvm::SmallDenseMap<StringAttr, int64_t> &shape,
+    ArrayRef<unsigned> order) {
   assert(shape.size() == layout.getNumOutDims());
+  assert(order.size() == layout.getNumOutDims());
   if (shape.empty()) {
     return layout;
   }
@@ -111,15 +106,23 @@ LinearLayout ensureLayoutNotSmallerThan(
   StringAttr kDim = *layout.getInDimNames().begin();
   assert(kDim == "register" || kDim == "offset");
 
-  LinearLayout ret = layout;
-  for (StringAttr outDimName : layout.getOutDimNames()) {
-    int32_t actualSize = layout.getOutDimSize(outDimName);
+  // Temporarily reorder to minor-to-major per `order`. The order indices
+  // are positions into the layout's getOutDimNames().
+  auto origOutDimNames = llvm::to_vector(layout.getOutDimNames());
+  SmallVector<StringAttr> orderedDims;
+  for (unsigned idx : order)
+    orderedDims.push_back(origOutDimNames[idx]);
+  LinearLayout ordered = layout.transposeOuts(orderedDims);
+
+  LinearLayout ret = ordered;
+  for (StringAttr outDimName : ordered.getOutDimNames()) {
+    int32_t actualSize = ordered.getOutDimSize(outDimName);
     int32_t desiredSize = shape.lookup(outDimName);
     assert(actualSize > desiredSize || desiredSize % actualSize == 0);
     ret *= LinearLayout::identity1D(desiredSize / actualSize, kDim, outDimName);
     assert(ret.getOutDimSize(outDimName) >= desiredSize);
   }
-  return ret;
+  return ret.transposeOuts(origOutDimNames);
 }
 
 // Returns ["dim0", "dim1", ..., "dim<rank-1>"].
@@ -162,7 +165,7 @@ LinearLayout identityStandardND(StringAttr inDimName, ArrayRef<unsigned> shape,
     int dim = order[i];
     ret *= LinearLayout::identity1D(shape[dim], inDimName, outDimNames[dim]);
   }
-  return ret;
+  return ret.transposeOuts(outDimNames);
 }
 
 LinearLayout zerosLike(const LinearLayout &layout) {

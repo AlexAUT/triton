@@ -181,7 +181,8 @@ struct CoalesceAsyncCopyWrites
           triton::standardOutDimNames(ctx, rank));
 
       newRegLayout = triton::gpu::combineCtaCgaWithShape(
-          newRegLayout, blockedEnc.getCGALayout(), srcTy.getShape());
+          newRegLayout, blockedEnc.getCGALayout(), srcTy.getShape(),
+          blockedEnc.getOrder());
 
       auto newRegToShared = newRegLayout.invertAndCompose(sharedLayout);
       if (newRegToShared.getNumConsecutiveInOut() < loadContig) {
