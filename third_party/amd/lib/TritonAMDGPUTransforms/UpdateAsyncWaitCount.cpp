@@ -58,7 +58,7 @@ namespace {
 // mapping between global and shared memory addresses.
 int getNumberOfAsyncCopyInstructions(RankedTensorType globalType,
                                      ttg::MemDescType sharedType, Value mask,
-                                     int contig,
+                                     int ptrContig, int contigHint,
                                      ModuleAxisInfoAnalysis &axisInfo,
                                      AMD::TargetInfo targetInfo, bool isStore) {
   LinearLayout globalLayout = tt::gpu::toLinearLayout(globalType);
@@ -80,10 +80,19 @@ int getNumberOfAsyncCopyInstructions(RankedTensorType globalType,
   if (globalToSharedLayout.getFreeVariableMasks().lookup(kWarp) != 0) {
     return 0;
   }
-  contig = std::min(contig, globalToSharedLayout.getNumConsecutiveInOut());
 
   if (mask)
-    contig = std::min<int>(contig, axisInfo.getMaskAlignment(mask));
+    ptrContig = std::min<int>(ptrContig, axisInfo.getMaskAlignment(mask));
+
+  // The contigHint can bump the contig of ptr/mask related contiguity.
+  ptrContig = std::max<int>(ptrContig, contigHint);
+  ptrContig =
+      std::min(ptrContig, globalToSharedLayout.getNumConsecutiveInOut());
+  // For padded encodings restrict vec by the min interval
+  auto srcEnc = sharedType.getEncoding();
+  if (auto padEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(srcEnc)) {
+    ptrContig = std::min<int>(ptrContig, padEnc.getMinInterval());
+  }
 
   // Divide number of registers by contig to get the number of async intrinsics.
   // Strip zero bases from the register dimension first — a zero basis means
@@ -92,13 +101,13 @@ int getNumberOfAsyncCopyInstructions(RankedTensorType globalType,
   auto kReg = StringAttr::get(globalType.getContext(), "register");
   int numberOfRegisters =
       globalToSharedLayout.removeZeroBasesAlongDim(kReg).getInDimSize(kReg);
-  int numInstructions = std::max(1, numberOfRegisters / contig);
+  int numInstructions = std::max(1, numberOfRegisters / ptrContig);
 
-  // On targets where a given vector width is unsupported but half of it is,
-  // the store lowering splits each async store into two half-width stores
+  // When a given vector width is unsupported but half of it is, the store
+  // lowering splits each async store into two half-width stores.
   if (isStore) {
     int elemBitWidth = sharedType.getElementType().getIntOrFloatBitWidth();
-    int vecBits = contig * elemBitWidth;
+    int vecBits = ptrContig * elemBitWidth;
     if (!targetInfo.supportsDirectFromLdsStoreBitWidth(vecBits) &&
         targetInfo.supportsDirectFromLdsStoreBitWidth(vecBits / 2)) {
       numInstructions *= 2;
@@ -119,7 +128,8 @@ int getOpNumberOfAsyncCopyInstructions(Operation *op,
     int contig = LLVM::AMD::getVectorSize(copyOp.getSrc(), axisInfo);
     return getNumberOfAsyncCopyInstructions(
         copyOp.getSrc().getType(), copyOp.getResult().getType(),
-        copyOp.getMask(), contig, axisInfo, targetInfo, /*isStore=*/false);
+        copyOp.getMask(), contig, copyOp.getContiguity(), axisInfo, targetInfo,
+        /*isStore=*/false);
   } else if (auto bufferOp = dyn_cast<amdgpu::BufferLoadToLocalOp>(op)) {
     auto ptrType = cast<RankedTensorType>(LLVM::AMD::getPointerTypeWithShape(
         bufferOp.getPtr(), bufferOp.getOffsets()));
@@ -127,12 +137,12 @@ int getOpNumberOfAsyncCopyInstructions(Operation *op,
                                           bufferOp.getOffsets(), axisInfo);
     return getNumberOfAsyncCopyInstructions(
         ptrType, bufferOp.getDest().getType(), bufferOp.getMask(), contig,
-        axisInfo, targetInfo, /*isStore=*/false);
+        bufferOp.getContiguity(), axisInfo, targetInfo, /*isStore=*/false);
   } else if (auto copyOp = dyn_cast<amdgpu::AsyncCopyLocalToGlobalOp>(op)) {
     int contig = LLVM::AMD::getVectorSize(copyOp.getDst(), axisInfo);
     return getNumberOfAsyncCopyInstructions(
         copyOp.getDst().getType(), copyOp.getSrc().getType(), copyOp.getMask(),
-        contig, axisInfo, targetInfo, /*isStore=*/true);
+        contig, copyOp.getContiguity(), axisInfo, targetInfo, /*isStore=*/true);
   } else if (emitRemarkOnNonAsyncOp) {
     SmallVector<mlir::MemoryEffects::EffectInstance> effects;
     if (auto memEffectIface = dyn_cast<MemoryEffectOpInterface>(op))
