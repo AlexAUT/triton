@@ -62,13 +62,10 @@ int getNumberOfAsyncCopyInstructions(RankedTensorType globalType,
                                      ModuleAxisInfoAnalysis &axisInfo,
                                      AMD::TargetInfo targetInfo, bool isStore) {
   LinearLayout globalLayout = tt::gpu::toLinearLayout(globalType);
-  LinearLayout sharedLayout;
-  if (auto paddedEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(
-          sharedType.getEncoding())) {
-    sharedLayout = paddedEnc.getLinearComponent();
-  } else {
-    sharedLayout = triton::gpu::toLinearLayout(sharedType);
-  }
+  triton::LinearLayout sharedLayout =
+      triton::gpu::isPaddedEncoding(sharedType.getEncoding())
+          ? paddedLinearLayout(sharedType)
+          : toLinearLayout(sharedType);
   LinearLayout globalToSharedLayout =
       globalLayout.invertAndCompose(sharedLayout);
 
