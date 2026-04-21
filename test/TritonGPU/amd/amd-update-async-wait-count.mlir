@@ -453,6 +453,29 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // -----
 
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: bf16_local_to_global_split_waitcnt
+  tt.func public @bf16_local_to_global_split_waitcnt(%arg1: !ttg.memdesc<4x32xbf16, #shared, #smem, mutable>, %arg2: tensor<4x32x!tt.ptr<bf16>, #blocked>) {
+    // Emits 2 async store intrinsics (16-bit store split into two 8-bit stores)
+    %0 = amdg.async_copy_local_to_global %arg1, %arg2 : !ttg.memdesc<4x32xbf16, #shared, #smem, mutable> -> tensor<4x32x!tt.ptr<bf16>, #blocked>
+    %1 = ttg.async_commit_group tokens %0
+    // Emits 2 async store intrinsics
+    %2 = amdg.async_copy_local_to_global %arg1, %arg2 : !ttg.memdesc<4x32xbf16, #shared, #smem, mutable> -> tensor<4x32x!tt.ptr<bf16>, #blocked>
+    %3 = ttg.async_commit_group tokens %2
+
+    // CHECK: amdg.async_wait {{.*}} {num_inst = 2
+    %9 = ttg.async_wait %1 {num = 0 : i32}
+    // CHECK: amdg.async_wait {{.*}} {num_inst = 0
+    %10 = ttg.async_wait %3 {num = 0 : i32}
+    tt.return
+  }
+}
+
+// -----
+
 // Test mixing async_copy_global_to_local and async_copy_local_to_global on GFX1250
 
 #blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>
