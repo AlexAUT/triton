@@ -60,7 +60,8 @@ int getNumberOfAsyncCopyInstructions(RankedTensorType globalType,
                                      ttg::MemDescType sharedType, Value mask,
                                      int ptrContig, int contigHint,
                                      ModuleAxisInfoAnalysis &axisInfo,
-                                     AMD::TargetInfo targetInfo, bool isStore) {
+                                     const AMD::TargetInfo &targetInfo,
+                                     bool isStore) {
   LinearLayout globalLayout = tt::gpu::toLinearLayout(globalType);
   triton::LinearLayout sharedLayout =
       triton::gpu::isPaddedEncoding(sharedType.getEncoding())
@@ -78,14 +79,21 @@ int getNumberOfAsyncCopyInstructions(RankedTensorType globalType,
     return 0;
   }
 
+  // We progressively tighten the pointer contiguity to mirror the lowering of
+  // async ops, starting with the mask alignment.
   if (mask)
     ptrContig = std::min<int>(ptrContig, axisInfo.getMaskAlignment(mask));
 
-  // The contigHint can bump the contig of ptr/mask related contiguity.
+  // Ops may carry a contiguity hint that raises the contiguity beyond what
+  // the pointer and mask axis info analysis can prove.
   ptrContig = std::max<int>(ptrContig, contigHint);
+
+  // The global-to-shared layout limits the consecutive elements which can be
+  // transferred by a single async intrinsic.
   ptrContig =
       std::min(ptrContig, globalToSharedLayout.getNumConsecutiveInOut());
-  // For padded encodings restrict vec by the min interval
+
+  // For padded layouts the padding interval limits the vectorization.
   auto srcEnc = sharedType.getEncoding();
   if (auto padEnc = dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(srcEnc)) {
     ptrContig = std::min<int>(ptrContig, padEnc.getMinInterval());
