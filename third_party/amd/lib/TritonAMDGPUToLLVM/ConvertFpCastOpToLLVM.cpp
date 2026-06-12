@@ -2004,9 +2004,7 @@ struct FpToFpOpConversion
         !(isCDNA4OrHigher(isaFamily) &&
           (llvm::isa<Float8E4M3FNType, Float8E4M3FNUZType, Float8E5M2Type,
                      Float8E5M2FNUZType>(dstElementType))) &&
-        !(isaFamily == ISAFamily::CDNA3 &&
-          (llvm::isa<Float8E4M3FNUZType, Float8E5M2FNUZType>(
-              dstElementType))) &&
+        !(llvm::isa<Float8E4M3FNUZType, Float8E5M2FNUZType>(dstElementType)) &&
         !(!isCDNA4OrHigher(isaFamily) &&
           (llvm::isa<Float8E5M2Type, Float8E4M3FNType>(dstElementType)));
 
