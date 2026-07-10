@@ -1,5 +1,6 @@
 // RUN: triton-opt %s --split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx942 | FileCheck --check-prefixes=COMMON,GFX942 %s
 // RUN: triton-opt %s --split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx950 | FileCheck --check-prefixes=COMMON,GFX950 %s
+// RUN: triton-opt %s --split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1201 | FileCheck --check-prefixes=COMMON,GFX1201 %s
 
 //  CHECK-LABEL: f16_to_f32
 #blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
@@ -143,6 +144,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
     // GFX942: rocdl.cvt.pk.bf8.f32 %{{.*}}, %{{.*}} -> %{{.*}}[false]
     // GFX942: rocdl.cvt.pk.bf8.f32 %{{.*}}, %{{.*}} -> %{{.*}}[true]
     // GFX950-COUNT-16: llvm.trunc %{{.+}} : i32 to i8
+    // GFX1201-NOT: llvm.fptrunc
+    // GFX1201-COUNT-16: llvm.trunc %{{.+}} : i32 to i8
+    // GFX1201-NOT: llvm.fptrunc
     %6 = tt.fp_to_fp %arg0, rounding = rtne : tensor<8x8xf32, #ttg.dot_op<{opIdx = 0, parent = #blocked2}>> -> tensor<8x8xf8E5M2FNUZ, #ttg.dot_op<{opIdx = 0, parent = #blocked2}>>
     tt.return
   }
@@ -159,6 +163,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
     // GFX942: rocdl.cvt.pk.fp8.f32 %{{.*}}, %{{.*}} -> %{{.*}}[false]
     // GFX942: rocdl.cvt.pk.fp8.f32 %{{.*}}, %{{.*}} -> %{{.*}}[true]
     // GFX950-COUNT-16: llvm.trunc %{{.+}} : i32 to i8
+    // GFX1201-NOT: llvm.fptrunc
+    // GFX1201-COUNT-16: llvm.trunc %{{.+}} : i32 to i8
+    // GFX1201-NOT: llvm.fptrunc
     %7 = tt.fp_to_fp %arg0, rounding = rtne : tensor<8x8xf32, #ttg.dot_op<{opIdx = 0, parent = #blocked2}>> -> tensor<8x8xf8E4M3FNUZ, #ttg.dot_op<{opIdx = 0, parent = #blocked2}>>
     tt.return
   }
