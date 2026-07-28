@@ -244,6 +244,16 @@ LogicalResult verifyTDMCommonLayout(Operation *op,
   if (swizzledEnc && swizzledEnc.getMaxPhase() != 1)
     return op->emitOpError("TDM does not support swizzling");
 
+  // TDM walks the allocation with the innermost dimension contiguous.
+  if (llvm::isa<gpu::SwizzledSharedEncodingAttr, gpu::PaddedSharedEncodingAttr>(
+          enc)) {
+    auto sharedOrder =
+        triton::gpu::getOrder(llvm::cast<gpu::SharedEncodingTrait>(enc),
+                              triton::gpu::getShapePerCTA(smemTy));
+    if (sharedOrder[0] != sharedOrder.size() - 1)
+      return op->emitOpError("TDM only supports row-major shared order");
+  }
+
   auto droppedDims = getTDMDroppedDims(op, descTy, smemTy);
   if (failed(droppedDims))
     return failure();
@@ -1177,6 +1187,68 @@ LogicalResult AsyncTDMCopyLocalToGlobalOp::verify() {
   return success();
 }
 
+// Gather and scatter share emitTDMGatherScatter, which reads the descriptor
+// from SGPRs and resolves the row index with the lane dimension pinned to 0.
+// Both therefore impose the same requirements on the index layout.
+static LogicalResult
+verifyTDMGatherScatterIndexLayout(Operation *op, StringRef kind,
+                                  RankedTensorType indicesType,
+                                  gpu::MemDescType smemTy) {
+  MLIRContext *ctx = op->getContext();
+
+  // The lowering unconditionally builds a linear layout from the index tensor,
+  // so an unencoded index tensor cannot be lowered at all.
+  if (!indicesType.getEncoding())
+    return op->emitOpError("TDM ")
+           << kind << " requires an encoding on the index tensor";
+
+  auto indexLL = triton::gpu::toLinearLayout(indicesType);
+  auto kLane = mlir::StringAttr::get(ctx, "lane");
+  auto kBlock = mlir::StringAttr::get(ctx, "block");
+  auto freeVarMasks = indexLL.getFreeVariableMasks();
+  unsigned laneFreeMask = freeVarMasks.lookup(kLane);
+  unsigned numLanes = indexLL.getInDimSize(kLane);
+  if (laneFreeMask != (numLanes - 1))
+    return op->emitOpError(
+        "index layout distributes values across lanes, which is "
+        "incompatible with the warp-level TDM instruction. Change layout "
+        "to broadcast the same indices to all lanes in a warp.");
+
+  // Because indices only describe rows the CGA layout of the indices and the
+  // shared allocation must only match on the row dimension.
+  // How the tensor is distributed across the columns is not relevant for the
+  // indices and is only encoded in the CGA layout of the allocation.
+  auto paddedEnc =
+      llvm::dyn_cast<gpu::PaddedSharedEncodingAttr>(smemTy.getEncoding());
+  auto sharedLL = paddedEnc ? paddedEnc.getLinearComponent()
+                            : triton::gpu::toLinearLayout(smemTy);
+  auto kDim0 = mlir::StringAttr::get(ctx, "dim0");
+  auto indexBlockIt = indexLL.getBases().find(kBlock);
+  auto sharedBlockIt = sharedLL.getBases().find(kBlock);
+
+  bool indexHasBlockBasis =
+      indexBlockIt != indexLL.getBases().end() && !indexBlockIt->second.empty();
+  bool sharedHasBlockBasis = sharedBlockIt != sharedLL.getBases().end() &&
+                             !sharedBlockIt->second.empty();
+
+  if (indexHasBlockBasis != sharedHasBlockBasis) {
+    return op->emitOpError("TDM ")
+           << kind
+           << " index and destination layout must both have a block basis or "
+              "neither have a block basis";
+  } else if (indexHasBlockBasis && sharedHasBlockBasis) {
+    auto indexRowCGA = indexLL.sublayout({kBlock}, {kDim0});
+    auto sharedRowCGA = sharedLL.sublayout({kBlock}, {kDim0});
+    if (!indexRowCGA.equalIgnoringOutDimSizes(sharedRowCGA))
+      return op->emitOpError("TDM ")
+             << kind
+             << " index and shared encoding must have the same block basis "
+                "for the row dimension";
+  }
+
+  return success();
+}
+
 LogicalResult AsyncTDMScatterOp::verify() {
   auto tensorDescTy = getDesc().getType();
   auto smemTy = getSrc().getType();
@@ -1226,6 +1298,10 @@ LogicalResult AsyncTDMScatterOp::verify() {
              << intervals[0]
              << ", innermost per-CTA dimension=" << innermostPerCTA << ")";
   }
+
+  if (failed(verifyTDMGatherScatterIndexLayout(getOperation(), "scatter",
+                                               dstRowIndicesType, smemTy)))
+    return failure();
 
   return success();
 }
@@ -1280,55 +1356,9 @@ LogicalResult AsyncTDMGatherOp::verify() {
              << ", innermost per-CTA dimension=" << innermostPerCTA << ")";
   }
 
-  auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);
-  auto sharedOrder = triton::gpu::getOrder(
-      cast<triton::gpu::SharedEncodingTrait>(smemTy.getEncoding()),
-      shapePerCTA);
-  if (sharedOrder[0] != (sharedOrder.size() - 1))
-    return emitOpError("TDM gather only supports row-major shared order");
-
-  // TDM gather reads the descriptor from SGPRs — all lanes in a warp see
-  // the same descriptor. The index layout must broadcast the same values
-  // to all lanes (all lane bits must be free).
-  if (srcRowIndicesType.getEncoding()) {
-    auto indexLL = triton::gpu::toLinearLayout(srcRowIndicesType);
-    auto kLane = mlir::StringAttr::get(getContext(), "lane");
-    auto kBlock = mlir::StringAttr::get(getContext(), "block");
-    auto freeVarMasks = indexLL.getFreeVariableMasks();
-    unsigned laneFreeMask = freeVarMasks.lookup(kLane);
-    unsigned numLanes = indexLL.getInDimSize(kLane);
-    if (laneFreeMask != (numLanes - 1))
-      return emitOpError(
-          "index layout distributes values across lanes, which is "
-          "incompatible with the warp-level TDM instruction. Change layout "
-          "to broadcast the same indices to all lanes in a warp.");
-
-    // Because indices only describe rows the CGA layout of the indices and the
-    // destination must only match on the row dimension.
-    // How the tensor is distributed across the columns is not relevant for the
-    // indicies and is only encoded in the CGA layout of the destination.
-    auto sharedLL = paddedEnc ? paddedEnc.getLinearComponent()
-                              : triton::gpu::toLinearLayout(smemTy);
-    auto kDim0 = mlir::StringAttr::get(getContext(), "dim0");
-    auto indexBlockIt = indexLL.getBases().find(kBlock);
-    auto sharedBlockIt = sharedLL.getBases().find(kBlock);
-
-    bool indexHasBlockBasis = indexBlockIt != indexLL.getBases().end() &&
-                              !indexBlockIt->second.empty();
-    bool sharedHasBlockBasis = sharedBlockIt != sharedLL.getBases().end() &&
-                               !sharedBlockIt->second.empty();
-
-    if (indexHasBlockBasis != sharedHasBlockBasis) {
-      return emitOpError("TDM gather index and destination layout must both "
-                         "have a block basis or neither have a block basis");
-    } else if (indexHasBlockBasis && sharedHasBlockBasis) {
-      auto indexRowCGA = indexLL.sublayout({kBlock}, {kDim0});
-      auto sharedRowCGA = sharedLL.sublayout({kBlock}, {kDim0});
-      if (!indexRowCGA.equalIgnoringOutDimSizes(sharedRowCGA))
-        return emitOpError("TDM gather index and shared encoding must have "
-                           "the same block basis for the row dimension");
-    }
-  }
+  if (failed(verifyTDMGatherScatterIndexLayout(getOperation(), "gather",
+                                               srcRowIndicesType, smemTy)))
+    return failure();
 
   return success();
 }

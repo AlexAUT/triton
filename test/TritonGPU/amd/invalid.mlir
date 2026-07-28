@@ -718,6 +718,42 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // -----
 
+// TDM walks the allocation with the innermost dimension contiguous, so a
+// column-major allocation cannot be used, even though the padding matches.
+#col_desc = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [8, 64]}>
+#col_alloc = #ttg.padded_shared<[64:+8] {order = [0, 1], shape = [8, 64]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_load_column_major_allocation(
+    %tensorDesc: !tt.tensordesc<8x64xf16, #col_desc>,
+    %memDesc: !ttg.memdesc<8x64xf16, #col_alloc, #smem, mutable>
+  ) {
+    // expected-error @+1 {{TDM only supports row-major shared order}}
+    %token = amdg.async_tdm_copy_global_to_local %tensorDesc into %memDesc : !tt.tensordesc<8x64xf16, #col_desc> -> !ttg.memdesc<8x64xf16, #col_alloc, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+// Gather rejects a column-major allocation as well.
+#col_gather_desc = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [1, 64]}>
+#col_gather_alloc = #ttg.padded_shared<[64:+8] {order = [0, 1], shape = [8, 64]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_gather_column_major_allocation(
+    %tensorDesc: !tt.tensordesc<1x64xf16, #col_gather_desc>,
+    %memDesc: !ttg.memdesc<8x64xf16, #col_gather_alloc, #smem, mutable>,
+    %row_indices: tensor<8xi32>
+  ) {
+    // expected-error @+1 {{TDM only supports row-major shared order}}
+    %token = amdg.async_tdm_gather %tensorDesc[%row_indices] to %memDesc : tensor<8xi32>, !ttg.memdesc<8x64xf16, #col_gather_alloc, #smem, mutable> -> !tt.tensordesc<1x64xf16, #col_gather_desc>
+    tt.return
+  }
+}
+
+// -----
+
 // The padding interval has to match the extent each CTA actually owns. Here the
 // 64 columns of the block are split over 2 CTAs, so the per-CTA row is 32 wide
 // and an interval of 64 never lands at a row boundary.
@@ -803,6 +839,82 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
   tt.func @scaled_upcast_fp4_one_sided_encoding(%x: tensor<16x32xi8>, %s: tensor<16x64xi8, #enc>) {
     // expected-error @+1 {{scale and output must both have an encoding, or neither}}
     %u = amdg.scaled_upcast_fp4 %x scale %s {axis = 1 : i32} : tensor<16x32xi8>, tensor<16x64xi8, #enc> -> tensor<16x64xbf16>
+    tt.return
+  }
+}
+
+// -----
+
+// Scatter with an index layout that distributes values across lanes. The
+// lowering resolves the row index with the lane dimension pinned to 0, so every
+// lane would scatter using lane 0's index.
+#blocked_scatter_lane = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [1, 1], order = [1, 0]}>
+#slice_scatter_lane = #ttg.slice<{dim = 1, parent = #blocked_scatter_lane}>
+#shared_scatter_lane = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+#smem_scatter_lane = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func @tdm_scatter_invalid_lane_distribution(
+    %memDesc: !ttg.memdesc<32x128xf16, #shared_scatter_lane, #smem_scatter_lane, mutable>,
+    %tensorDesc: !tt.tensordesc<32x128xf16>,
+    %row_indices: tensor<32xi32, #slice_scatter_lane>
+  ) {
+    // expected-error @+1 {{index layout distributes values across lanes}}
+    amdg.async_tdm_scatter %tensorDesc[%row_indices] from %memDesc : tensor<32xi32, #slice_scatter_lane>, !ttg.memdesc<32x128xf16, #shared_scatter_lane, #smem_scatter_lane, mutable> -> !tt.tensordesc<32x128xf16>
+    tt.return
+  }
+}
+
+// -----
+
+// Scatter whose index CGA layout has no block basis while the source does.
+#linear_scatter = #ttg.linear<{register = [[1, 0], [2, 0], [4, 0], [8, 0]], lane = [[0, 0], [0, 0], [0, 0], [0, 0], [0, 0]], warp = [], block = [], order = [1, 0]}>
+#slice_scatter = #ttg.slice<{dim = 1, parent = #linear_scatter}>
+#shared_scatter_cga = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0], CGALayout = [[1, 0], [2, 0]]}>
+#smem_scatter_cga = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 4 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func @tdm_scatter_invalid_missing_index_block_basis(
+    %memDesc: !ttg.memdesc<16x64xf16, #shared_scatter_cga, #smem_scatter_cga, mutable>,
+    %tensorDesc: !tt.tensordesc<16x64xf16>,
+    %row_indices: tensor<16xi32, #slice_scatter>
+  ) {
+    // expected-error @+1 {{TDM scatter index and destination layout must both have a block basis or neither have a block basis}}
+    amdg.async_tdm_scatter %tensorDesc[%row_indices] from %memDesc : tensor<16xi32, #slice_scatter>, !ttg.memdesc<16x64xf16, #shared_scatter_cga, #smem_scatter_cga, mutable> -> !tt.tensordesc<16x64xf16>
+    tt.return
+  }
+}
+
+// -----
+
+// Gather with an unencoded index tensor. The lowering unconditionally builds a
+// linear layout from the index type, so this must be rejected rather than
+// crashing the compiler.
+#shared_gather_noenc = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+#smem_gather_noenc = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func @tdm_gather_invalid_unencoded_indices(
+    %memDesc: !ttg.memdesc<32x128xf16, #shared_gather_noenc, #smem_gather_noenc, mutable>,
+    %tensorDesc: !tt.tensordesc<32x128xf16>,
+    %row_indices: tensor<32xi32>
+  ) {
+    // expected-error @+1 {{TDM gather requires an encoding on the index tensor}}
+    %token = amdg.async_tdm_gather %tensorDesc[%row_indices] to %memDesc : tensor<32xi32>, !ttg.memdesc<32x128xf16, #shared_gather_noenc, #smem_gather_noenc, mutable> -> !tt.tensordesc<32x128xf16>
+    tt.return
+  }
+}
+
+// -----
+
+// Scatter with an unencoded index tensor.
+#shared_scatter_noenc = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0]}>
+#smem_scatter_noenc = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func @tdm_scatter_invalid_unencoded_indices(
+    %memDesc: !ttg.memdesc<32x128xf16, #shared_scatter_noenc, #smem_scatter_noenc, mutable>,
+    %tensorDesc: !tt.tensordesc<32x128xf16>,
+    %row_indices: tensor<32xi32>
+  ) {
+    // expected-error @+1 {{TDM scatter requires an encoding on the index tensor}}
+    amdg.async_tdm_scatter %tensorDesc[%row_indices] from %memDesc : tensor<32xi32>, !ttg.memdesc<32x128xf16, #shared_scatter_noenc, #smem_scatter_noenc, mutable> -> !tt.tensordesc<32x128xf16>
     tt.return
   }
 }
