@@ -98,10 +98,83 @@ LogicalResult verifyTDMBlockSize(Operation *op, ArrayRef<int64_t> blockShape) {
   return success();
 }
 
+// Number of leading descriptor dimensions a rank-reducing access drops from the
+// shared memory allocation, or failure if the two ranks cannot be reconciled.
+FailureOr<size_t> getTDMDroppedDims(Operation *op,
+                                    triton::TensorDescType descTy,
+                                    gpu::MemDescType smemTy) {
+  ArrayRef<int64_t> descShape = descTy.getShape();
+  size_t descRank = descShape.size();
+  size_t allocRank = smemTy.getRank();
+
+  if (descRank < allocRank)
+    return op->emitOpError("shared memory allocation has rank ")
+           << allocRank << ", which exceeds the rank " << descRank
+           << " of the tensor descriptor";
+
+  // Only leading unit dimensions may disappear; dropping a larger dimension
+  // would silently discard part of the block.
+  for (size_t i = 0, e = descRank - allocRank; i < e; ++i) {
+    if (descShape[i] != 1)
+      return op->emitOpError("a rank-reducing TDM access may only drop leading "
+                             "unit dimensions of the descriptor block, but "
+                             "dimension ")
+             << i << " has size " << descShape[i];
+  }
+  return descRank - allocRank;
+}
+
+// Verify the descriptor block and the allocation describe the same data. TDM
+// transfers the whole block, so an allocation smaller than the block would be
+// written out of bounds. Gather and scatter address a subset of the rows of a
+// potentially larger allocation, so they only pin the innermost dimension.
+LogicalResult verifyTDMShapeConsistency(Operation *op,
+                                        triton::TensorDescType descTy,
+                                        gpu::MemDescType smemTy,
+                                        size_t droppedDims,
+                                        bool allocMayHaveExtraRows) {
+  ArrayRef<int64_t> blockShape = descTy.getShape().drop_front(droppedDims);
+  ArrayRef<int64_t> allocShape = smemTy.getShape();
+
+  for (auto [dim, extents] :
+       llvm::enumerate(llvm::zip_equal(blockShape, allocShape))) {
+    auto [blockDim, allocDim] = extents;
+    bool isInnermost = dim + 1 == blockShape.size();
+    if (blockDim == allocDim)
+      continue;
+    if (allocMayHaveExtraRows && !isInnermost && allocDim > blockDim)
+      continue;
+    return op->emitOpError("descriptor block dimension ")
+           << dim + droppedDims << " (" << blockDim
+           << ") does not match the corresponding shared memory allocation "
+              "dimension ("
+           << allocDim << "); TDM transfers the whole descriptor block";
+  }
+  return success();
+}
+
+// Verify the descriptor and allocation agree on the size of an element. TDM
+// moves raw bytes and takes the transfer element size from the descriptor, so a
+// disagreement makes the copy address the allocation with the wrong stride.
+LogicalResult verifyTDMElementType(Operation *op, triton::TensorDescType descTy,
+                                   gpu::MemDescType smemTy) {
+  Type descElemTy = descTy.getElementType();
+  Type allocElemTy = smemTy.getElementType();
+  if (!descElemTy.isIntOrFloat() || !allocElemTy.isIntOrFloat())
+    return success();
+
+  if (descElemTy.getIntOrFloatBitWidth() != allocElemTy.getIntOrFloatBitWidth())
+    return op->emitOpError("element type of the tensor descriptor (")
+           << descElemTy << ") and of the shared memory allocation ("
+           << allocElemTy << ") must have the same bit width";
+  return success();
+}
+
 // Verify the descriptor and allocation carry a consistent TDM shared layout
 LogicalResult verifyTDMLayoutConsistency(Operation *op,
                                          triton::TensorDescType descTy,
-                                         gpu::MemDescType smemTy) {
+                                         gpu::MemDescType smemTy,
+                                         size_t droppedDims) {
   Attribute descLayout = descTy.getSharedLayout();
   if (!descLayout)
     return success();
@@ -112,23 +185,32 @@ LogicalResult verifyTDMLayoutConsistency(Operation *op,
   // allocation, so the two swizzled encodings have different ranks even though
   // they describe the same LDS layout. Compare the physical layouts with the
   // dropped dimensions projected away.
-  int descRank = descTy.getShape().size();
-  int allocRank = smemTy.getRank();
-  if (descRank > allocRank &&
+  if (droppedDims > 0 &&
       llvm::isa<gpu::SwizzledSharedEncodingAttr>(descLayout) &&
       llvm::isa<gpu::SwizzledSharedEncodingAttr>(allocLayout)) {
     auto descLL = gpu::toLinearLayout(descTy.getShape(), descLayout);
-    for (int i = 0; i < descRank - allocRank; ++i)
+    for (size_t i = 0; i < droppedDims; ++i)
       descLL = triton::removeStandardDim(descLL, 0);
     compatible = descLL == gpu::toLinearLayout(smemTy);
   }
   // Padded layouts bake in the tile shape, so compare the physical padding
-  // only.
+  // only. The shape itself is checked against the allocation separately.
   auto descPad = llvm::dyn_cast<gpu::PaddedSharedEncodingAttr>(descLayout);
   auto allocPad = llvm::dyn_cast<gpu::PaddedSharedEncodingAttr>(allocLayout);
-  if (descPad && allocPad)
+  if (descPad && allocPad) {
     compatible = descPad.getIntervals() == allocPad.getIntervals() &&
                  descPad.getPaddings() == allocPad.getPaddings();
+    // When the block covers the whole allocation the two linear components are
+    // directly comparable, which also pins the dimension order and the CGA
+    // layout. Gather and scatter describe a single row of a larger allocation,
+    // so their shapes - and therefore their linear components - differ by
+    // design.
+    bool blockCoversAlloc =
+        descTy.getShape().drop_front(droppedDims) == smemTy.getShape();
+    if (compatible && droppedDims == 0 && blockCoversAlloc)
+      compatible =
+          descPad.getLinearComponent() == allocPad.getLinearComponent();
+  }
 
   if (!compatible)
     return op->emitOpError("shared layout of the tensor descriptor (")
@@ -141,19 +223,39 @@ LogicalResult verifyTDMLayoutConsistency(Operation *op,
   return success();
 }
 
+// The TDM lowerings drive every copy from the per-CTA extent of the shared
+// memory allocation, so the padding constraints have to be checked against that
+// same extent rather than against the descriptor block shape, which is larger
+// whenever the innermost dimension is split across CTAs.
+int64_t getTDMInnermostExtentPerCTA(gpu::MemDescType smemTy) {
+  return triton::gpu::getShapePerCTA(smemTy).back();
+}
+
 // Verify the TDM layout constraints common to all TDM ops
 LogicalResult verifyTDMCommonLayout(Operation *op,
                                     triton::TensorDescType descTy,
-                                    gpu::MemDescType smemTy) {
+                                    gpu::MemDescType smemTy,
+                                    bool allocMayHaveExtraRows = false) {
   if (failed(verifyTDMBlockSize(op, descTy.getShape())))
     return failure();
 
-  auto swizzledEnc =
-      llvm::dyn_cast<gpu::SwizzledSharedEncodingAttr>(smemTy.getEncoding());
+  auto enc = smemTy.getEncoding();
+  auto swizzledEnc = llvm::dyn_cast<gpu::SwizzledSharedEncodingAttr>(enc);
   if (swizzledEnc && swizzledEnc.getMaxPhase() != 1)
     return op->emitOpError("TDM does not support swizzling");
 
-  return verifyTDMLayoutConsistency(op, descTy, smemTy);
+  auto droppedDims = getTDMDroppedDims(op, descTy, smemTy);
+  if (failed(droppedDims))
+    return failure();
+
+  if (failed(verifyTDMShapeConsistency(op, descTy, smemTy, *droppedDims,
+                                       allocMayHaveExtraRows)))
+    return failure();
+
+  if (failed(verifyTDMElementType(op, descTy, smemTy)))
+    return failure();
+
+  return verifyTDMLayoutConsistency(op, descTy, smemTy, *droppedDims);
 }
 
 // The v_cvt_scale_pk8 lowering upcasts 8 register-consecutive fp4 values with a
@@ -1056,7 +1158,6 @@ LogicalResult AsyncTDMCopyLocalToGlobalOp::verify() {
   if (!paddedEnc && !llvm::isa<gpu::SwizzledSharedEncodingAttr>(enc))
     return emitOpError("Invalid shared memory layout for TDM");
 
-  auto blockShape = tensorDescTy.getShape();
   if (paddedEnc) {
     // Check if we can apply the padding workaround, see the lowering to LLVM
     // for more details.
@@ -1064,13 +1165,13 @@ LogicalResult AsyncTDMCopyLocalToGlobalOp::verify() {
     if (intervals.size() != 1)
       return emitOpError("TDM store only supports single interval paddings.");
 
-    auto shapePerCTA = triton::gpu::getShapePerCTA(paddedEnc, blockShape);
-    if (intervals[0] != shapePerCTA.back())
+    int64_t innermostPerCTA = getTDMInnermostExtentPerCTA(smemTy);
+    if (intervals[0] != innermostPerCTA)
       return emitOpError("TDM store padding is only supported when padding "
-                         "interval equals the innermost block dimension (got "
-                         "padInterval=")
-             << intervals[0] << ", innermost dimension=" << blockShape.back()
-             << ")";
+                         "interval equals the innermost per-CTA block "
+                         "dimension (got padInterval=")
+             << intervals[0]
+             << ", innermost per-CTA dimension=" << innermostPerCTA << ")";
   }
 
   return success();
@@ -1086,7 +1187,8 @@ LogicalResult AsyncTDMScatterOp::verify() {
     return emitOpError("TDM scatter only supports 2D tensors, got ")
            << blockShape.size() << "D";
 
-  if (failed(verifyTDMCommonLayout(getOperation(), tensorDescTy, smemTy)))
+  if (failed(verifyTDMCommonLayout(getOperation(), tensorDescTy, smemTy,
+                                   /*allocMayHaveExtraRows=*/true)))
     return failure();
 
   auto enc = smemTy.getEncoding();
@@ -1116,12 +1218,13 @@ LogicalResult AsyncTDMScatterOp::verify() {
     if (intervals.size() != 1)
       return emitOpError("TDM scatter only supports single interval paddings.");
 
-    if (intervals[0] != blockShape.back())
+    int64_t innermostPerCTA = getTDMInnermostExtentPerCTA(smemTy);
+    if (intervals[0] != innermostPerCTA)
       return emitOpError("TDM scatter padding is only supported when padding "
-                         "interval equals the innermost block dimension (got "
-                         "padInterval=")
-             << intervals[0] << ", innermost dimension=" << blockShape.back()
-             << ")";
+                         "interval equals the innermost per-CTA block "
+                         "dimension (got padInterval=")
+             << intervals[0]
+             << ", innermost per-CTA dimension=" << innermostPerCTA << ")";
   }
 
   return success();
@@ -1137,7 +1240,8 @@ LogicalResult AsyncTDMGatherOp::verify() {
     return emitOpError("TDM gather only supports 2D tensors, got ")
            << blockShape.size() << "D";
 
-  if (failed(verifyTDMCommonLayout(getOperation(), tensorDescTy, smemTy)))
+  if (failed(verifyTDMCommonLayout(getOperation(), tensorDescTy, smemTy,
+                                   /*allocMayHaveExtraRows=*/true)))
     return failure();
 
   auto enc = smemTy.getEncoding();
@@ -1167,12 +1271,13 @@ LogicalResult AsyncTDMGatherOp::verify() {
       return emitOpError(
           "TDM gather does not support multiple interval-padding pairs");
 
-    if (blockShape.back() % paddedEnc.getIntervals()[0] != 0)
+    int64_t innermostPerCTA = getTDMInnermostExtentPerCTA(smemTy);
+    if (innermostPerCTA % paddedEnc.getIntervals()[0] != 0)
       return emitOpError(
                  "TDM gather padding interval must divide the innermost "
-                 "block dimension (got padInterval=")
+                 "per-CTA block dimension (got padInterval=")
              << paddedEnc.getIntervals()[0]
-             << ", innermost dimension=" << blockShape.back() << ")";
+             << ", innermost per-CTA dimension=" << innermostPerCTA << ")";
   }
 
   auto shapePerCTA = triton::gpu::getShapePerCTA(smemTy);

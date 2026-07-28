@@ -213,7 +213,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %memDesc: !ttg.memdesc<128x64xf16, #shared_32, #smem, mutable>
   ) {
     %c0_i32 = arith.constant 0 : i32
-    // expected-error @+1 {{TDM store padding is only supported when padding interval equals the innermost block dimension}}
+    // expected-error @+1 {{TDM store padding is only supported when padding interval equals the innermost per-CTA block dimension}}
     amdg.async_tdm_copy_local_to_global %tensorDesc from %memDesc: !ttg.memdesc<128x64xf16, #shared_32, #smem, mutable> -> !tt.tensordesc<128x64xf16>
     tt.return
   }
@@ -306,7 +306,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %memDesc: !ttg.memdesc<16x64xf16, #shared, #smem, mutable>,
     %row_indices: tensor<16xi32, #slice>
   ) {
-    // expected-error @+1 {{TDM gather padding interval must divide the innermost block dimension}}
+    // expected-error @+1 {{TDM gather padding interval must divide the innermost per-CTA block dimension}}
     %token = amdg.async_tdm_gather %tensorDesc[%row_indices] to %memDesc : tensor<16xi32, #slice>, !ttg.memdesc<16x64xf16, #shared, #smem, mutable> -> !tt.tensordesc<16x64xf16, #shared>
     tt.return
   }
@@ -346,7 +346,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %row_indices: tensor<8xi32>
   ) {
     %c0_i32 = arith.constant 0 : i32
-    // expected-error @+1 {{TDM scatter padding is only supported when padding interval equals the innermost block dimension}}
+    // expected-error @+1 {{TDM scatter padding is only supported when padding interval equals the innermost per-CTA block dimension}}
     amdg.async_tdm_scatter %tensorDesc[%row_indices] from %memDesc : tensor<8xi32>, !ttg.memdesc<8x64xf16, #shared_scatter_32, #smem_scatter, mutable> -> !tt.tensordesc<8x64xf16>
     tt.return
   }
@@ -656,8 +656,97 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %tensorDesc: !tt.tensordesc<2x32xf16, #non_unit_desc>,
     %memDesc: !ttg.memdesc<64xf16, #non_unit_alloc, #smem, mutable>
   ) {
-    // expected-error @+1 {{is inconsistent with the shared memory allocation layout}}
+    // expected-error @+1 {{may only drop leading unit dimensions of the descriptor block, but dimension 0 has size 2}}
     %token = amdg.async_tdm_copy_global_to_local %tensorDesc into %memDesc : !tt.tensordesc<2x32xf16, #non_unit_desc> -> !ttg.memdesc<64xf16, #non_unit_alloc, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+// The copy transfers the whole descriptor block, so an allocation smaller than
+// the block would be written out of bounds.
+#undersized_desc = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [8, 64]}>
+#undersized_alloc = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [4, 64]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_load_allocation_smaller_than_block(
+    %tensorDesc: !tt.tensordesc<8x64xf16, #undersized_desc>,
+    %memDesc: !ttg.memdesc<4x64xf16, #undersized_alloc, #smem, mutable>
+  ) {
+    // expected-error @+1 {{descriptor block dimension 0 (8) does not match the corresponding shared memory allocation dimension (4)}}
+    %token = amdg.async_tdm_copy_global_to_local %tensorDesc into %memDesc : !tt.tensordesc<8x64xf16, #undersized_desc> -> !ttg.memdesc<4x64xf16, #undersized_alloc, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+// The innermost dimension must match exactly, even for gather, which is
+// otherwise allowed to target an allocation with extra rows.
+#narrow_desc = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [1, 64]}>
+#narrow_alloc = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [8, 32]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_gather_innermost_dimension_mismatch(
+    %tensorDesc: !tt.tensordesc<1x64xf16, #narrow_desc>,
+    %memDesc: !ttg.memdesc<8x32xf16, #narrow_alloc, #smem, mutable>,
+    %row_indices: tensor<8xi32>
+  ) {
+    // expected-error @+1 {{descriptor block dimension 1 (64) does not match the corresponding shared memory allocation dimension (32)}}
+    %token = amdg.async_tdm_gather %tensorDesc[%row_indices] to %memDesc : tensor<8xi32>, !ttg.memdesc<8x32xf16, #narrow_alloc, #smem, mutable> -> !tt.tensordesc<1x64xf16, #narrow_desc>
+    tt.return
+  }
+}
+
+// -----
+
+// TDM derives the transfer element size from the descriptor, so the allocation
+// must agree on how wide an element is.
+#elem_shared = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [8, 64]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_load_element_type_width_mismatch(
+    %tensorDesc: !tt.tensordesc<8x64xf16, #elem_shared>,
+    %memDesc: !ttg.memdesc<8x64xf32, #elem_shared, #smem, mutable>
+  ) {
+    // expected-error @+1 {{element type of the tensor descriptor ('f16') and of the shared memory allocation ('f32') must have the same bit width}}
+    %token = amdg.async_tdm_copy_global_to_local %tensorDesc into %memDesc : !tt.tensordesc<8x64xf16, #elem_shared> -> !ttg.memdesc<8x64xf32, #elem_shared, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+// The padding interval has to match the extent each CTA actually owns. Here the
+// 64 columns of the block are split over 2 CTAs, so the per-CTA row is 32 wide
+// and an interval of 64 never lands at a row boundary.
+#cta_split_pad = #ttg.padded_shared<[64:+8] {offset = [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [1, 0], [2, 0], [4, 0]], block = [[0, 32]]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_scatter_padding_interval_ignores_cta_split(
+    %tensorDesc: !tt.tensordesc<8x64xf16, #cta_split_pad>,
+    %memDesc: !ttg.memdesc<8x64xf16, #cta_split_pad, #smem, mutable>,
+    %row_indices: tensor<8xi32>
+  ) {
+    // expected-error @+1 {{TDM scatter padding is only supported when padding interval equals the innermost per-CTA block dimension (got padInterval=64, innermost per-CTA dimension=32)}}
+    amdg.async_tdm_scatter %tensorDesc[%row_indices] from %memDesc : tensor<8xi32>, !ttg.memdesc<8x64xf16, #cta_split_pad, #smem, mutable> -> !tt.tensordesc<8x64xf16, #cta_split_pad>
+    tt.return
+  }
+}
+
+// -----
+
+#cta_split_pad_gather = #ttg.padded_shared<[64:+8] {offset = [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [1, 0], [2, 0], [4, 0]], block = [[0, 32]]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_gather_padding_interval_ignores_cta_split(
+    %tensorDesc: !tt.tensordesc<8x64xf16, #cta_split_pad_gather>,
+    %memDesc: !ttg.memdesc<8x64xf16, #cta_split_pad_gather, #smem, mutable>,
+    %row_indices: tensor<8xi32>
+  ) {
+    // expected-error @+1 {{TDM gather padding interval must divide the innermost per-CTA block dimension (got padInterval=64, innermost per-CTA dimension=32)}}
+    %token = amdg.async_tdm_gather %tensorDesc[%row_indices] to %memDesc : tensor<8xi32>, !ttg.memdesc<8x64xf16, #cta_split_pad_gather, #smem, mutable> -> !tt.tensordesc<8x64xf16, #cta_split_pad_gather>
     tt.return
   }
 }
@@ -717,3 +806,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
     tt.return
   }
 }
+// -----
+
+// Scatter with an index layout that distributes values across lanes. The
+// lowering resolves the row index with the lane dimension pinned to 0, so all
+// lanes would scatter using lane 0s
