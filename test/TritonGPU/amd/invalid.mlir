@@ -789,6 +789,43 @@ module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // -----
 
+// A TDM completion barrier is an mbarrier, so it has to be an Nxi64 allocation
+// like the one the dedicated barrier ops take.
+#bar_shared = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [8, 64]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_load_barrier_is_not_an_mbarrier(
+    %tensorDesc: !tt.tensordesc<8x64xf16, #bar_shared>,
+    %memDesc: !ttg.memdesc<8x64xf16, #bar_shared, #smem, mutable>,
+    %barrier: !ttg.memdesc<8x64xf16, #bar_shared, #smem, mutable>
+  ) {
+    // expected-error @+1 {{barrier allocation must be a descriptor of Nxi64 type with N <= number of CTAs}}
+    %token = amdg.async_tdm_copy_global_to_local %tensorDesc into %memDesc, barrier = %barrier : !tt.tensordesc<8x64xf16, #bar_shared>, !ttg.memdesc<8x64xf16, #bar_shared, #smem, mutable> -> !ttg.memdesc<8x64xf16, #bar_shared, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+// An i32 barrier is half the required width.
+#bar_shared = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [8, 64]}>
+#bar_1d = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_gather_barrier_too_narrow(
+    %tensorDesc: !tt.tensordesc<1x64xf16, #bar_shared>,
+    %memDesc: !ttg.memdesc<8x64xf16, #bar_shared, #smem, mutable>,
+    %row_indices: tensor<8xi32>,
+    %barrier: !ttg.memdesc<1xi32, #bar_1d, #smem, mutable>
+  ) {
+    // expected-error @+1 {{barrier allocation must be a descriptor of Nxi64 type with N <= number of CTAs}}
+    %token = amdg.async_tdm_gather %tensorDesc[%row_indices] to %memDesc, barrier = %barrier : tensor<8xi32>, !ttg.memdesc<8x64xf16, #bar_shared, #smem, mutable>, !ttg.memdesc<1xi32, #bar_1d, #smem, mutable> -> !tt.tensordesc<1x64xf16, #bar_shared>
+    tt.return
+  }
+}
+
+// -----
+
 // scaled_upcast_fp4: scale and output rank mismatch.
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
   tt.func @scaled_upcast_fp4_rank_mismatch(%x: tensor<16x32xi8>, %s: tensor<64xi8>) {

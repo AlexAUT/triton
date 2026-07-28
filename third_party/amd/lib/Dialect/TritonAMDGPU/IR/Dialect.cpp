@@ -223,6 +223,16 @@ LogicalResult verifyTDMLayoutConsistency(Operation *op,
   return success();
 }
 
+// A TDM op signals completion with an LDS atomic arrive on an mbarrier, so an
+// attached barrier has to satisfy the same constraints as one driven by the
+// dedicated barrier ops.
+LogicalResult verifyOptionalTDMBarrier(Operation *op, Value barrier) {
+  if (!barrier)
+    return success();
+  return triton::verifyBarrierType(
+      op, llvm::cast<gpu::MemDescType>(barrier.getType()));
+}
+
 // The TDM lowerings drive every copy from the per-CTA extent of the shared
 // memory allocation, so the padding constraints have to be checked against that
 // same extent rather than against the descriptor block shape, which is larger
@@ -1087,6 +1097,9 @@ LogicalResult AsyncTDMCopyGlobalToLocalOp::verify() {
   if (failed(verifyTDMSharedMemoryEncoding(getOperation(), smemTy)))
     return failure();
 
+  if (failed(verifyOptionalTDMBarrier(getOperation(), getBarrier())))
+    return failure();
+
   if (auto warpUsedHintAttr = getWarpUsedHintAttr()) {
     int numWarps = gpu::lookupNumWarps(*this);
     uint32_t hint = static_cast<uint32_t>(warpUsedHintAttr.getInt());
@@ -1161,6 +1174,9 @@ LogicalResult AsyncTDMCopyLocalToGlobalOp::verify() {
   auto smemTy = getSrc().getType();
 
   if (failed(verifyTDMCommonLayout(getOperation(), tensorDescTy, smemTy)))
+    return failure();
+
+  if (failed(verifyOptionalTDMBarrier(getOperation(), getBarrier())))
     return failure();
 
   auto enc = smemTy.getEncoding();
@@ -1263,6 +1279,9 @@ LogicalResult AsyncTDMScatterOp::verify() {
                                    /*allocMayHaveExtraRows=*/true)))
     return failure();
 
+  if (failed(verifyOptionalTDMBarrier(getOperation(), getBarrier())))
+    return failure();
+
   auto enc = smemTy.getEncoding();
   if (!llvm::isa<gpu::PaddedSharedEncodingAttr>(enc) &&
       !llvm::isa<gpu::SwizzledSharedEncodingAttr>(enc))
@@ -1318,6 +1337,9 @@ LogicalResult AsyncTDMGatherOp::verify() {
 
   if (failed(verifyTDMCommonLayout(getOperation(), tensorDescTy, smemTy,
                                    /*allocMayHaveExtraRows=*/true)))
+    return failure();
+
+  if (failed(verifyOptionalTDMBarrier(getOperation(), getBarrier())))
     return failure();
 
   auto enc = smemTy.getEncoding();
