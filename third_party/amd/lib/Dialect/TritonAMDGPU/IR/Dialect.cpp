@@ -242,11 +242,54 @@ int64_t getTDMInnermostExtentPerCTA(gpu::MemDescType smemTy) {
 }
 
 // Verify the TDM layout constraints common to all TDM ops
+// A padded layout reaches the hardware as descriptor fields that are narrower
+// than the layout can express: the interval is stored as
+// log2(interval in dwords) - 1 in 3 bits and the amount as
+// (amount in dwords) - 1 in 7 bits. createTDMDescriptor writes those fields
+// from the layout of whichever descriptor is built, so the bounds hold for
+// every TDM op rather than just the ones that consume the padding.
+LogicalResult verifyTDMPaddingFields(Operation *op, gpu::MemDescType smemTy) {
+  auto paddedEnc =
+      llvm::dyn_cast<gpu::PaddedSharedEncodingAttr>(smemTy.getEncoding());
+  if (!paddedEnc)
+    return success();
+
+  constexpr uint64_t dwordSize = 32;
+  constexpr uint64_t maxPadIntervalInDwords = 1 << 8;
+  constexpr uint64_t maxPadAmountInDwords = 1 << 7;
+  auto elementBitWidth = smemTy.getElementType().getIntOrFloatBitWidth();
+
+  for (auto [interval, padding] :
+       llvm::zip(paddedEnc.getIntervals(), paddedEnc.getPaddings())) {
+    auto intervalInDwords = interval * elementBitWidth / dwordSize;
+    if (intervalInDwords < 2)
+      return op->emitOpError("TDM padding interval must be at least 2 dwords");
+    if (intervalInDwords > maxPadIntervalInDwords)
+      return op->emitOpError("TDM padding interval of ")
+             << interval << " elements is " << intervalInDwords
+             << " dwords, which exceeds the maximum of "
+             << maxPadIntervalInDwords;
+
+    auto paddingInDwords = padding * elementBitWidth / dwordSize;
+    if (paddingInDwords < 1)
+      return op->emitOpError("TDM padding amount must be at least 1 dword");
+    if (paddingInDwords > maxPadAmountInDwords)
+      return op->emitOpError("TDM padding amount of ")
+             << padding << " elements is " << paddingInDwords
+             << " dwords, which exceeds the maximum of "
+             << maxPadAmountInDwords;
+  }
+  return success();
+}
+
 LogicalResult verifyTDMCommonLayout(Operation *op,
                                     triton::TensorDescType descTy,
                                     gpu::MemDescType smemTy,
                                     bool allocMayHaveExtraRows = false) {
   if (failed(verifyTDMBlockSize(op, descTy.getShape())))
+    return failure();
+
+  if (failed(verifyTDMPaddingFields(op, smemTy)))
     return failure();
 
   auto enc = smemTy.getEncoding();
@@ -1038,23 +1081,6 @@ LogicalResult verifyTDMSharedMemoryEncoding(Operation *op,
   if (!paddedEnc && !swizzledEnc && !partitionedEnc)
     return op->emitOpError("Invalid shared memory layout for TDM");
 
-  Type elementType = smemTy.getElementType();
-  auto elementBitWidth = elementType.getIntOrFloatBitWidth();
-  if (paddedEnc) {
-    unsigned dwordSize = 32;
-    for (auto [interval, padding] :
-         llvm::zip(paddedEnc.getIntervals(), paddedEnc.getPaddings())) {
-      auto intervalInDwords = interval * elementBitWidth / dwordSize;
-      if (intervalInDwords < 2)
-        return op->emitOpError(
-            "TDM padding interval must be at least 2 dwords");
-
-      auto paddingInDwords = padding * elementBitWidth / dwordSize;
-      if (paddingInDwords < 1)
-        return op->emitOpError("TDM padding amount must be at least 1 dword");
-    }
-  }
-
   return success();
 }
 
@@ -1198,6 +1224,12 @@ LogicalResult AsyncTDMCopyLocalToGlobalOp::verify() {
                          "dimension (got padInterval=")
              << intervals[0]
              << ", innermost per-CTA dimension=" << innermostPerCTA << ")";
+
+    // The lowering skips the padding elements by widening tile_dim0 to cover
+    // them, so the encoded value is the interval plus the amount rather than
+    // the block dimension verifyTDMBlockSize checked. verifyTDMPaddingFields
+    // caps those at 256 and 128 dwords, which keeps the sum well inside the
+    // 16-bit tile_dim0 field for every supported element type.
   }
 
   return success();

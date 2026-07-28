@@ -789,6 +789,79 @@ module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // -----
 
+// The descriptor holds log2(pad interval in dwords) - 1 in a 3-bit field, so an
+// interval above 256 dwords cannot be encoded. 1024 f16 elements is 512 dwords,
+// which used to abort the compiler in createTDMDescriptor. A 320 KB LDS makes
+// rows this wide allocatable, so the limit is now easy to reach.
+#pad_interval_max = #ttg.padded_shared<[1024:+8] {order = [1, 0], shape = [8, 1024]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_load_pad_interval_exceeds_field(
+    %tensorDesc: !tt.tensordesc<8x1024xf16, #pad_interval_max>,
+    %memDesc: !ttg.memdesc<8x1024xf16, #pad_interval_max, #smem, mutable>
+  ) {
+    // expected-error @+1 {{TDM padding interval of 1024 elements is 512 dwords, which exceeds the maximum of 256}}
+    %token = amdg.async_tdm_copy_global_to_local %tensorDesc into %memDesc : !tt.tensordesc<8x1024xf16, #pad_interval_max> -> !ttg.memdesc<8x1024xf16, #pad_interval_max, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+// The pad amount occupies a 7-bit field holding (amount in dwords) - 1, so more
+// than 128 dwords of padding cannot be encoded. 512 f16 elements is 256 dwords.
+#pad_amount_max = #ttg.padded_shared<[512:+512] {order = [1, 0], shape = [8, 512]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_load_pad_amount_exceeds_field(
+    %tensorDesc: !tt.tensordesc<8x512xf16, #pad_amount_max>,
+    %memDesc: !ttg.memdesc<8x512xf16, #pad_amount_max, #smem, mutable>
+  ) {
+    // expected-error @+1 {{TDM padding amount of 512 elements is 256 dwords, which exceeds the maximum of 128}}
+    %token = amdg.async_tdm_copy_global_to_local %tensorDesc into %memDesc : !tt.tensordesc<8x512xf16, #pad_amount_max> -> !ttg.memdesc<8x512xf16, #pad_amount_max, #smem, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+// The fields belong to the descriptor, so the bounds apply to a store too. The
+// descriptor is built from the layout by createTDMDescriptor regardless of the
+// direction it is later used in, and a store used to abort the compiler there.
+#pad_store_interval = #ttg.padded_shared<[1024:+8] {order = [1, 0], shape = [8, 1024]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_store_pad_interval_exceeds_field(
+    %tensorDesc: !tt.tensordesc<8x1024xf16, #pad_store_interval>,
+    %memDesc: !ttg.memdesc<8x1024xf16, #pad_store_interval, #smem, mutable>
+  ) {
+    // expected-error @+1 {{TDM padding interval of 1024 elements is 512 dwords, which exceeds the maximum of 256}}
+    amdg.async_tdm_copy_local_to_global %tensorDesc from %memDesc : !ttg.memdesc<8x1024xf16, #pad_store_interval, #smem, mutable> -> !tt.tensordesc<8x1024xf16, #pad_store_interval>
+    tt.return
+  }
+}
+
+// -----
+
+// Gather and scatter build the same descriptor fields, so they are bounded too.
+#pad_gather_interval = #ttg.padded_shared<[1024:+8] {order = [1, 0], shape = [8, 1024]}>
+#blocked_idx = #ttg.blocked<{sizePerThread = [8, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [1, 0]}>
+#slice_idx = #ttg.slice<{dim = 1, parent = #blocked_idx}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @tdm_gather_pad_interval_exceeds_field(
+    %tensorDesc: !tt.tensordesc<8x1024xf16, #pad_gather_interval>,
+    %memDesc: !ttg.memdesc<8x1024xf16, #pad_gather_interval, #smem, mutable>,
+    %rowIndices: tensor<8xi32, #slice_idx>
+  ) {
+    // expected-error @+1 {{TDM padding interval of 1024 elements is 512 dwords, which exceeds the maximum of 256}}
+    amdg.async_tdm_gather %tensorDesc[%rowIndices] to %memDesc : tensor<8xi32, #slice_idx>, !ttg.memdesc<8x1024xf16, #pad_gather_interval, #smem, mutable> -> !tt.tensordesc<8x1024xf16, #pad_gather_interval>
+    tt.return
+  }
+}
+
+// -----
+
 // A TDM completion barrier is an mbarrier, so it has to be an Nxi64 allocation
 // like the one the dedicated barrier ops take.
 #bar_shared = #ttg.padded_shared<[64:+8] {order = [1, 0], shape = [8, 64]}>

@@ -238,6 +238,31 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // -----
 
+// A padded store at the widest interval the descriptor can encode: the 3-bit
+// pad interval field tops out at 256 dwords, which is 512 f16 elements. Rows
+// this wide only become useful with a 320 KB LDS, since 256 of them occupy
+// (256 * 512 + 255 * 8) * 2 = 266224 bytes. The 4 warps split the outer
+// dimension, leaving a per-warp innermost tile of 512, which the padding widens
+// to 520. That is encoded into tile_dim0 at group1[3]<31:16>, so the constant
+// OR'd in is 520 << 16 == 0x02080000 == 34078720.
+#shared_max = #ttg.padded_shared<[512:+8] {order = [1, 0], shape = [256, 512]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: tdm_store_padded_max_interval
+  // CHECK-DAG: %[[TILE:.*]] = llvm.mlir.constant(34078720 : i32) : i32
+  // CHECK: llvm.or %{{.*}}, %[[TILE]] : i32
+  // CHECK: "llvm.amdgcn.tensor.store.from.lds"
+  tt.func public @tdm_store_padded_max_interval(
+    %tensorDesc: !tt.tensordesc<256x512xf16, #shared_max>,
+    %memDesc: !ttg.memdesc<256x512xf16, #shared_max, #smem, mutable>
+  ) {
+    amdg.async_tdm_copy_local_to_global %tensorDesc from %memDesc : !ttg.memdesc<256x512xf16, #shared_max, #smem, mutable> -> !tt.tensordesc<256x512xf16, #shared_max>
+    tt.return
+  }
+}
+
+// -----
+
 #shared_5d = #ttg.padded_shared<[16:+4] {order = [4, 3, 2, 1, 0], shape = [8, 8, 8, 16, 16]}>
 #smem_5d = #ttg.shared_memory
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {

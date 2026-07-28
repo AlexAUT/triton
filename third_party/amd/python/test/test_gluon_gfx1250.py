@@ -2156,6 +2156,74 @@ def test_tensor_descriptor_load_store_invalid_blocksize():
             f"Expected parsing error for block size > 65536, but got: {error_msg}"
 
 
+# Largest padded interval the descriptor can encode, in elements: the field
+# holds log2(interval in dwords) - 1 in 3 bits, so the interval tops out at
+# 2^8 = 256 dwords.
+MAX_TDM_PAD_INTERVAL_F16 = 256 * 32 // 16
+
+
+@pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
+def test_tensor_descriptor_load_store_max_lds_padded():
+    """TDM round trip on the largest padded block the descriptor can describe.
+
+    A padded store needs the interval to equal the innermost block dimension, so
+    the interval limit caps a float16 row at 512 elements. Stacking as many of
+    those rows as a 320 KB LDS holds gives a 256x512 block. Padding sits between
+    intervals rather than after the last one, so that occupies
+    (256 * 512 + 255 * 8) * 2 = 266224 bytes, which does not fit the 160 KB of
+    earlier targets.
+    """
+    dtype_str = "float16"
+    M, N = 256, MAX_TDM_PAD_INTERVAL_F16
+    BLOCK_SHAPE = (M, N)
+    PAD_AMOUNT = 8
+    PADDED_LAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[N, PAD_AMOUNT]], BLOCK_SHAPE, [1, 0])
+
+    inp = to_triton(numpy_random(list(BLOCK_SHAPE), dtype_str), device="cpu", dst_type=dtype_str)
+    out = inp.new_empty(BLOCK_SHAPE)
+    inp = inp.cuda()
+    out = out.cuda()
+
+    constexpr_block_shape = tuple(ttgl.constexpr(v) for v in BLOCK_SHAPE)
+    k = tensor_descriptor_load_store_nd_kernel_device_tdm[(1, )](out, inp, inp.shape,
+                                                                 inp.stride(), constexpr_block_shape, out.shape,
+                                                                 out.stride(), PADDED_LAYOUT)
+
+    assert k.metadata.shared == (M * N + (M - 1) * PAD_AMOUNT) * 2
+    assert k.metadata.shared > 160 * 1024, "expected a block that only fits the 320 KB LDS"
+
+    amdgcn = k.asm["amdgcn"]
+    for pattern in ("tensor_load_to_lds", "tensor_store_from_lds", "s_wait_tensorcnt 0x0"):
+        assert re.search(pattern, amdgcn)
+
+    assert torch.equal(unwrap_tensor(inp.cpu()), unwrap_tensor(out.cpu()))
+
+
+@pytest.mark.skipif(not is_hip_gfx1250(), reason="Requires GFX1250")
+def test_tensor_descriptor_padding_interval_exceeds_field():
+    """One step past the encodable interval has to be a diagnostic, not a crash.
+
+    A 1024-element float16 interval is 512 dwords, which does not fit the 3-bit
+    pad interval field. This used to abort the compiler while building the
+    descriptor.
+    """
+    dtype_str = "float16"
+    N = MAX_TDM_PAD_INTERVAL_F16 * 2
+    BLOCK_SHAPE = (8, N)
+    PADDED_LAYOUT: ttgl.constexpr = ttgl.PaddedSharedLayout.with_identity_for([[N, 8]], BLOCK_SHAPE, [1, 0])
+
+    inp = to_triton(numpy_random(list(BLOCK_SHAPE), dtype_str), device="cpu", dst_type=dtype_str)
+    out = inp.new_empty(BLOCK_SHAPE)
+    inp = inp.cuda()
+    out = out.cuda()
+
+    constexpr_block_shape = tuple(ttgl.constexpr(v) for v in BLOCK_SHAPE)
+    with pytest.raises(Exception, match="TDM padding interval of 1024 elements is 512 dwords"):
+        tensor_descriptor_load_store_nd_kernel_device_tdm[(1, )](out, inp, inp.shape,
+                                                                 inp.stride(), constexpr_block_shape, out.shape,
+                                                                 out.stride(), PADDED_LAYOUT)
+
+
 @gluon.jit
 def tensor_descriptor_prefetch_nd_kernel_device_tdm(a_ptr, shape, strides, BLOCK_SHAPE, SHARED_LAYOUT: ttgl.constexpr,
                                                     PREFETCH_SPECULATIVE: ttgl.constexpr):
