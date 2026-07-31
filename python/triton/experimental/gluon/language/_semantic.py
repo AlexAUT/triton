@@ -2,7 +2,8 @@ from typing import Sequence, List, TypeVar, Tuple, Callable
 import math
 from triton.language.semantic import TritonSemantic
 from . import _core as ttgl
-from ._layouts import AutoLayout, DistributedLayout, DistributedLinearLayout, SliceLayout, SharedLayout, CoalescedLayout, SharedLinearLayout
+from ._layouts import (AutoLayout, CoalescedLayout, DistributedLayout, DistributedLinearLayout, PaddedSharedLayout,
+                       SharedLayout, SharedLinearLayout, SliceLayout, SwizzledSharedLayout)
 from triton._C.libtriton.gluon_ir import GluonOpBuilder, compute_tmem_reg_layout
 from triton._C.libtriton import ir
 from triton.compiler.code_generator import flatten_values_to_ir, unflatten_ir_values
@@ -427,15 +428,16 @@ class GluonSemantic(TritonSemantic[TensorTy]):
         _check(isinstance(length, int), lambda: f"expected 'length' to be an int but got {length}")
         _check(isinstance(dim, int), lambda: f"expected 'dim' to be an int but got {dim}")
         _check(0 <= dim < mem_desc.rank, lambda: f"expected 'dim' in [0, {mem_desc.rank}) but got {dim}")
-        _check(
-            mem_desc.shape == mem_desc.type.alloc_shape[-mem_desc.rank:],
-            lambda: "cta_slice does not support slicing an existing subview",
-        )
         layout = mem_desc.layout
         _check(
-            isinstance(layout, ttgl.PaddedSharedLayout),
-            lambda: f"cta_slice currently requires PaddedSharedLayout but got {type(layout)}",
+            isinstance(layout, (PaddedSharedLayout, SwizzledSharedLayout)),
+            lambda: f"cta_slice requires a padded or swizzled shared layout but got {type(layout)}",
         )
+        if isinstance(layout, PaddedSharedLayout):
+            _check(
+                mem_desc.shape == mem_desc.type.alloc_shape[-mem_desc.rank:],
+                lambda: "padded cta_slice does not support slicing an existing subview",
+            )
 
         src_shape_per_cta = ttgl._get_shape_per_cta(mem_desc.shape, layout.cga_layout)
         split = mem_desc.shape[dim] // src_shape_per_cta[dim]
@@ -455,28 +457,56 @@ class GluonSemantic(TritonSemantic[TensorTy]):
         shape[dim] = length
         shape_per_cta = ttgl._get_shape_per_cta(shape, layout.cga_layout)
 
-        # CTA-local slices use a resized physical layout: block bases retain
-        # CTA ownership while offset bases cover only the sliced per-CTA tile.
-        # PaddedSharedLayout.with_identity_for produces identity offset bases,
-        # so reject custom/swizzled offset bases until they can be resized
-        # without losing their layout semantics.
-        kept_bases = []
-        for basis in layout.offset_bases:
-            nonzero = [i for i, value in enumerate(basis) if value]
-            _check(
-                len(nonzero) == 1 and basis[nonzero[0]] & (basis[nonzero[0]] - 1) == 0,
-                lambda: "cta_slice currently requires identity PaddedSharedLayout offset bases",
+        if isinstance(layout, PaddedSharedLayout):
+            # CTA-local slices use a resized physical layout: block bases retain
+            # CTA ownership while offset bases cover only the sliced per-CTA tile.
+            # PaddedSharedLayout.with_identity_for produces identity offset bases,
+            # so reject custom offset bases until they can be resized without
+            # losing their layout semantics.
+            kept_bases = []
+            for basis in layout.offset_bases:
+                nonzero = [i for i, value in enumerate(basis) if value]
+                _check(
+                    len(nonzero) == 1 and basis[nonzero[0]] & (basis[nonzero[0]] - 1) == 0,
+                    lambda: "cta_slice currently requires identity PaddedSharedLayout offset bases",
+                )
+                basis_dim = nonzero[0]
+                if basis[basis_dim] < shape_per_cta[basis_dim]:
+                    kept_bases.append(basis)
+                else:
+                    # Preserve the physical bit position so that slicing a
+                    # reshaped layout does not compact later address bits.
+                    kept_bases.append([0] * mem_desc.rank)
+            resized_layout = PaddedSharedLayout(
+                layout.interval_padding_pairs,
+                kept_bases,
+                layout.cga_layout,
+                shape,
             )
-            basis_dim = nonzero[0]
-            if basis[basis_dim] < shape_per_cta[basis_dim]:
-                kept_bases.append(basis)
-
-        resized_layout = ttgl.PaddedSharedLayout(
-            layout.interval_padding_pairs,
-            kept_bases,
-            layout.cga_layout,
-            shape,
-        )
+        elif dim != layout.order[0]:
+            resized_layout = SwizzledSharedLayout(
+                layout.vec,
+                layout.per_phase,
+                layout.max_phase,
+                layout.order,
+                layout.cga_layout,
+            )
+        else:
+            _check(
+                layout.vec == 1 and layout.per_phase == 1 and layout.max_phase == 1,
+                lambda: "cta_slice along the contiguous dimension currently requires an unswizzled layout",
+            )
+            alloc_shape_per_cta = ttgl._get_shape_per_cta(mem_desc.type.alloc_shape[-mem_desc.rank:], layout.cga_layout)
+            offset_bases = []
+            for physical_dim in layout.order:
+                for bit in range(int(math.log2(alloc_shape_per_cta[physical_dim]))):
+                    basis = [0] * mem_desc.rank
+                    value = 1 << bit
+                    if value < shape_per_cta[physical_dim]:
+                        basis[physical_dim] = value
+                    offset_bases.append(basis)
+            block_bases = [[basis[d] * shape_per_cta[d] for d in range(mem_desc.rank)] for basis in layout.cga_layout]
+            resized_layout = SharedLinearLayout(offset_bases, block_bases)
         alloc_shape = list(mem_desc.type.alloc_shape[:-mem_desc.rank]) + shape
         ty = ttgl.shared_memory_descriptor_type(mem_desc.dtype, shape, resized_layout, alloc_shape)
         offsets = [0] * mem_desc.rank

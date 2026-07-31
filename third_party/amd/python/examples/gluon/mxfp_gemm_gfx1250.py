@@ -30,8 +30,8 @@ def swiglu_epilogue(acc):
 
 
 @gluon.constexpr_function
-def get_scale_blocked_layout(num_warps: gl.constexpr):
-    return gl.BlockedLayout([1, 8], [1, 32], [num_warps // 2, 2], [1, 0])
+def get_scale_blocked_layout(num_warps: gl.constexpr, cga_layout=()):
+    return gl.BlockedLayout([1, 8], [1, 32], [num_warps // 2, 2], [1, 0], cga_layout)
 
 
 @gluon.constexpr_function
@@ -165,6 +165,7 @@ class MXFPGEMMConfig:
     ACTIVATION: gl.constexpr
 
     TDM_SPLIT: gl.constexpr
+    CGA_LAYOUTS: gl.constexpr
 
     @gluon.constexpr_function
     def __init__(self, BLOCK_M, BLOCK_N, BLOCK_K, DTYPE_A, DTYPE_B, SCALE_BLOCK, NUM_BUFFERS, TRANSPOSE_B, WITH_A_SCALE,
@@ -192,6 +193,7 @@ class MXFPGEMMConfig:
         self.L2_PREFETCH_DISTANCE = gl.constexpr(L2_PREFETCH_DISTANCE)
         self.ACTIVATION = gl.constexpr(ACTIVATION)
         self.TDM_SPLIT = gl.constexpr(TDM_SPLIT)
+        self.CGA_LAYOUTS = gl.constexpr(CGA_LAYOUTS)
         if ACTIVATION == "swiglu":
             assert (BLOCK_N // NUM_SUBTILES[1]) % 2 == 0, \
             "SwiGLU requires (BLOCK_N // NUM_SUBTILES[1]) % 2 == 0"
@@ -337,7 +339,11 @@ class ScaleAsyncCopyDescriptor:
             BLOCK_NONK: gl.constexpr = cfg.BLOCK_N_PRESHUFFLED
         BLOCK_K: gl.constexpr = cfg.BLOCK_K_SCALE_PRESHUFFLED
 
-        blocked_layout: gl.constexpr = get_scale_blocked_layout(cfg.NUM_WARPS)
+        if op_idx == 0:
+            cga_layout: gl.constexpr = cfg.CGA_LAYOUTS.cga_layout_scale_a
+        else:
+            cga_layout: gl.constexpr = cfg.CGA_LAYOUTS.cga_layout_scale_b
+        blocked_layout: gl.constexpr = get_scale_blocked_layout(cfg.NUM_WARPS, cga_layout)
         offs_non_k = gl.arange(0, BLOCK_NONK, gl.SliceLayout(1, blocked_layout))
         offs_k = gl.arange(0, BLOCK_K, gl.SliceLayout(0, blocked_layout))
         offs = off + offs_non_k[:, None] * stride + offs_k[None, :]
@@ -529,6 +535,54 @@ def apply_activation_and_store(cfg, accumulator, c_desc, off_m, off_n):
     BLOCK_N_STORE: gl.constexpr = cfg.BLOCK_N // (2 if cfg.ACTIVATION == "swiglu" else 1)
     acc_buffer = gl.allocate_shared_memory(output.dtype, [cfg.BLOCK_M, BLOCK_N_STORE], c_desc.layout)
     acc_buffer.store(output)
+    gl.amd.gfx1250.tdm.async_store(c_desc, [off_m, off_n], acc_buffer)
+    gl.amd.gfx1250.tdm.async_wait(0)
+
+
+@gluon.jit
+def store_mn_subtiles(cfg, c00, c01, c10, c11, c_desc, off_m, off_n):
+    gl.static_assert(cfg.ACTIVATION == "", "multi-CTA sliceMNK does not support a fused activation")
+    SUBTILE_M: gl.constexpr = cfg.BLOCK_M // 2
+    SUBTILE_N: gl.constexpr = cfg.BLOCK_N // 2
+    acc_buffer = gl.allocate_shared_memory(c00.dtype, [cfg.BLOCK_M, cfg.BLOCK_N], c_desc.layout)
+
+    if cfg.CGA_LAYOUTS.ctas_per_cga[0] > 1:
+        row0 = acc_buffer.cta_slice(0, SUBTILE_M, 0)
+        row1 = acc_buffer.cta_slice(SUBTILE_M, SUBTILE_M, 0)
+    else:
+        row0 = acc_buffer.slice(0, SUBTILE_M, 0)
+        row1 = acc_buffer.slice(SUBTILE_M, SUBTILE_M, 0)
+
+    if cfg.CGA_LAYOUTS.ctas_per_cga[1] > 1:
+        row0.cta_slice(0, SUBTILE_N, 1).store(c00)
+        row0.cta_slice(SUBTILE_N, SUBTILE_N, 1).store(c01)
+        row1.cta_slice(0, SUBTILE_N, 1).store(c10)
+        row1.cta_slice(SUBTILE_N, SUBTILE_N, 1).store(c11)
+    else:
+        row0.slice(0, SUBTILE_N, 1).store(c00)
+        row0.slice(SUBTILE_N, SUBTILE_N, 1).store(c01)
+        row1.slice(0, SUBTILE_N, 1).store(c10)
+        row1.slice(SUBTILE_N, SUBTILE_N, 1).store(c11)
+
+    gl.barrier()
+    gl.amd.gfx1250.tdm.async_store(c_desc, [off_m, off_n], acc_buffer)
+    gl.amd.gfx1250.tdm.async_wait(0)
+
+
+@gluon.jit
+def store_n_subtiles(cfg, c0, c1, c_desc, off_m, off_n):
+    gl.static_assert(cfg.ACTIVATION == "", "multi-CTA sliceNK does not support a fused activation")
+    SUBTILE_N: gl.constexpr = cfg.BLOCK_N // 2
+    acc_buffer = gl.allocate_shared_memory(c0.dtype, [cfg.BLOCK_M, cfg.BLOCK_N], c_desc.layout)
+
+    if cfg.CGA_LAYOUTS.ctas_per_cga[1] > 1:
+        acc_buffer.cta_slice(0, SUBTILE_N, 1).store(c0)
+        acc_buffer.cta_slice(SUBTILE_N, SUBTILE_N, 1).store(c1)
+    else:
+        acc_buffer.slice(0, SUBTILE_N, 1).store(c0)
+        acc_buffer.slice(SUBTILE_N, SUBTILE_N, 1).store(c1)
+
+    gl.barrier()
     gl.amd.gfx1250.tdm.async_store(c_desc, [off_m, off_n], acc_buffer)
     gl.amd.gfx1250.tdm.async_wait(0)
 
@@ -1207,11 +1261,13 @@ class MXFPGEMMSliceNKProgram:
             a0, scale_a0 = self.issue_local_load_a(wmma_idx, 0, self.a_buffer, self.a_scale_buffer)
             b00, scale_b00 = self.issue_local_load_b(wmma_idx, 0, 0, self.b_buffer, self.b_scale_buffer)
 
-        accumulator = gl.join(c0, c1)
-        accumulator = accumulator.permute(0, 2, 1).reshape((cfg.BLOCK_M, cfg.BLOCK_N))
-        accumulator = gl.convert_layout(accumulator, cfg.acc_layout, assert_trivial=True)
-
-        apply_activation_and_store(self.cfg, accumulator, self.c_desc, self.c_off_m, self.c_off_n)
+        if cfg.CGA_LAYOUTS.ctas_per_cga[1] == 1:
+            accumulator = gl.join(c0, c1)
+            accumulator = accumulator.permute(0, 2, 1).reshape((cfg.BLOCK_M, cfg.BLOCK_N))
+            accumulator = gl.convert_layout(accumulator, cfg.acc_layout, assert_trivial=True)
+            apply_activation_and_store(self.cfg, accumulator, self.c_desc, self.c_off_m, self.c_off_n)
+        else:
+            store_n_subtiles(self.cfg, c0, c1, self.c_desc, self.c_off_m, self.c_off_n)
 
 
 @composition
@@ -1553,12 +1609,14 @@ class MXFPGEMMSliceMNKProgram:
             a00, scale_a00 = self.issue_local_load_a(wmma_idx, 0, 0, self.a_buffer, self.a_scale_buffer)
             b00, scale_b00 = self.issue_local_load_b(wmma_idx, 0, 0, self.b_buffer, self.b_scale_buffer)
 
-        acc_top = gl.join(c00, c01).permute(0, 2, 1).reshape((SUBTILE_M, cfg.BLOCK_N))
-        acc_bot = gl.join(c10, c11).permute(0, 2, 1).reshape((SUBTILE_M, cfg.BLOCK_N))
-        accumulator = gl.join(acc_top, acc_bot).permute(2, 0, 1).reshape((cfg.BLOCK_M, cfg.BLOCK_N))
-        accumulator = gl.convert_layout(accumulator, cfg.acc_layout)
-
-        apply_activation_and_store(self.cfg, accumulator, self.c_desc, self.c_off_m, self.c_off_n)
+        if cfg.CGA_LAYOUTS.ctas_per_cga[0] == 1 and cfg.CGA_LAYOUTS.ctas_per_cga[1] == 1:
+            acc_top = gl.join(c00, c01).permute(0, 2, 1).reshape((SUBTILE_M, cfg.BLOCK_N))
+            acc_bot = gl.join(c10, c11).permute(0, 2, 1).reshape((SUBTILE_M, cfg.BLOCK_N))
+            accumulator = gl.join(acc_top, acc_bot).permute(2, 0, 1).reshape((cfg.BLOCK_M, cfg.BLOCK_N))
+            accumulator = gl.convert_layout(accumulator, cfg.acc_layout)
+            apply_activation_and_store(self.cfg, accumulator, self.c_desc, self.c_off_m, self.c_off_n)
+        else:
+            store_mn_subtiles(self.cfg, c00, c01, c10, c11, self.c_desc, self.c_off_m, self.c_off_n)
 
 
 @composition
@@ -1969,12 +2027,14 @@ class MXFPGEMMSliceMNKTDMSplitProgram:
             a00, scale_a00 = self.issue_local_load_a(wmma_idx, 0, 0, self.a_scale_buffer)
             b00, scale_b00 = self.issue_local_load_b(wmma_idx, 0, 0, self.b_scale_buffer)
 
-        acc_top = gl.join(c00, c01).permute(0, 2, 1).reshape((SUBTILE_M, cfg.BLOCK_N))
-        acc_bot = gl.join(c10, c11).permute(0, 2, 1).reshape((SUBTILE_M, cfg.BLOCK_N))
-        accumulator = gl.join(acc_top, acc_bot).permute(2, 0, 1).reshape((cfg.BLOCK_M, cfg.BLOCK_N))
-        accumulator = gl.convert_layout(accumulator, cfg.acc_layout)
-
-        apply_activation_and_store(self.cfg, accumulator, self.c_desc, self.c_off_m, self.c_off_n)
+        if cfg.CGA_LAYOUTS.ctas_per_cga[0] == 1 and cfg.CGA_LAYOUTS.ctas_per_cga[1] == 1:
+            acc_top = gl.join(c00, c01).permute(0, 2, 1).reshape((SUBTILE_M, cfg.BLOCK_N))
+            acc_bot = gl.join(c10, c11).permute(0, 2, 1).reshape((SUBTILE_M, cfg.BLOCK_N))
+            accumulator = gl.join(acc_top, acc_bot).permute(2, 0, 1).reshape((cfg.BLOCK_M, cfg.BLOCK_N))
+            accumulator = gl.convert_layout(accumulator, cfg.acc_layout)
+            apply_activation_and_store(self.cfg, accumulator, self.c_desc, self.c_off_m, self.c_off_n)
+        else:
+            store_mn_subtiles(self.cfg, c00, c01, c10, c11, self.c_desc, self.c_off_m, self.c_off_n)
 
 
 @gluon.jit

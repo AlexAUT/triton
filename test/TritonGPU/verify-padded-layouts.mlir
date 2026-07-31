@@ -60,7 +60,7 @@
 
 // -----
 
-// expected-error@+1 {{Broadcasting in offset dimension is not supported.}}
+// Broadcasting in the offset dimension can represent a physical address gap.
 #shared = #ttg.padded_shared<[2:+1] {offset = [[0]], block = []}>
 
 // -----

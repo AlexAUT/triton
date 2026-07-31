@@ -579,7 +579,9 @@ struct MemDescCTASubsliceOpConversion
               "encodings");
 
     auto opOffsets = op.getOffsets();
-    LinearLayout ll = triton::gpu::paddedLinearLayout(srcTy);
+    bool isPadded = triton::gpu::isPaddedEncoding(srcTy.getEncoding());
+    LinearLayout ll = isPadded ? triton::gpu::paddedLinearLayout(srcTy)
+                               : triton::gpu::toLinearLayout(srcTy);
     auto dimNames = standardOutDimNames(ctx, opOffsets.size());
     SmallVector<std::pair<StringAttr, int32_t>> namedOffsets;
     for (auto [dim, offset] : llvm::zip(dimNames, opOffsets))
@@ -597,10 +599,12 @@ struct MemDescCTASubsliceOpConversion
       return rewriter.notifyMatchFailure(
           op, "CTA-local offset unexpectedly selects another CTA");
 
-    auto paddingShifts = getPaddedSharedShifts(srcTy.getEncoding(),
-                                               srcTy.getElementTypeBitWidth(),
-                                               /*offsetInBytes=*/false);
-    localOffset = applyPadding(localOffset, paddingShifts);
+    if (isPadded) {
+      auto paddingShifts = getPaddedSharedShifts(srcTy.getEncoding(),
+                                                 srcTy.getElementTypeBitWidth(),
+                                                 /*offsetInBytes=*/false);
+      localOffset = applyPadding(localOffset, paddingShifts);
+    }
 
     SmallVector<Value> newBases;
     for (Value base : smemObj.getBases())
