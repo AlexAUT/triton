@@ -840,6 +840,12 @@ void init_gluon_ir(py::module_ &m) {
              return self.create<ttg::MemDescSubsliceOp>(resultType, src,
                                                         offsets);
            })
+      .def("create_memdesc_cta_subslice",
+           [](GluonOpBuilder &self, Type resultType, Value src,
+              std::vector<int32_t> &offsets) -> Value {
+             return self.create<ttg::MemDescCTASubsliceOp>(resultType, src,
+                                                           offsets);
+           })
       .def("create_memdesc_trans",
            [](GluonOpBuilder &self, Value src,
               std::vector<int> &order) -> Value {

@@ -170,3 +170,19 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     tt.return
   }
 }
+
+// -----
+
+#src = #ttg.padded_shared<[4:+1] {offset = [[1], [2]], block = [[4]]}>
+#dst = #ttg.padded_shared<[4:+1] {offset = [[1]], block = [[2]]}>
+#blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0], CGALayout = [[1]]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: cta_local_subslice_load
+  tt.func @cta_local_subslice_load() {
+    %alloc = ttg.local_alloc : () -> !ttg.memdesc<8xf32, #src, #smem, mutable>
+    %slice = ttg.memdesc_cta_subslice %alloc[2] : !ttg.memdesc<8xf32, #src, #smem, mutable> -> !ttg.memdesc<4xf32, #dst, #smem, mutable>
+    %value = ttg.local_load %slice : !ttg.memdesc<4xf32, #dst, #smem, mutable> -> tensor<4xf32, #blocked>
+    tt.return
+  }
+}

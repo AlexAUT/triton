@@ -799,15 +799,19 @@ void init_triton_ir(py::module_ &m) {
 
   m.def(
       "parse_mlir_module",
-      [](const std::string &inputFilename, MLIRContext &context) {
-        // parse module
+      [](const std::string &inputFilename, MLIRContext &context,
+         bool allowUnregisteredDialects) {
+        if (allowUnregisteredDialects)
+          context.allowUnregisteredDialects(true);
+        ParserConfig config(&context);
         OwningOpRef<ModuleOp> module =
-            parseSourceFile<ModuleOp>(inputFilename, &context);
+            parseSourceFile<ModuleOp>(inputFilename, config);
         if (!module)
-          throw std::runtime_error("Parse MLIR file failed.");
+          throw std::runtime_error("parse mlir file failed.");
         return module->clone();
       },
-      ret::move);
+      py::arg("input_filename"), py::arg("context"),
+      py::arg("allow_unregistered_dialects") = false, ret::move);
 
   m.def(
       "deduce_scale_factor",

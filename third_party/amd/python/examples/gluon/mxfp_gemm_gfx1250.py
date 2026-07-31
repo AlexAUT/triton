@@ -5,7 +5,12 @@ from triton.experimental import gluon
 import triton.experimental.gluon.language as gl
 from triton.experimental.gluon.language.amd.gfx1250 import tdm
 from triton.experimental.gluon.language.amd.gfx1250 import async_copy as cp
+from triton.experimental.gluon.language.amd.gfx1250 import cluster
 from triton.tools.mxfp import MXFP4Tensor, MXScaleTensor
+from triton._C.libtriton.gluon_ir import make_cga_layout
+from triton._internal_testing import is_hip_gfx1250
+from dataclasses import dataclass
+from typing import List
 
 # Handle imports for both pytest (module context) and direct execution
 try:
@@ -30,7 +35,7 @@ def get_scale_blocked_layout(num_warps: gl.constexpr):
 
 
 @gluon.constexpr_function
-def get_wmma_layout(num_warps, packed, scale_preshuffle, instr_m=16):
+def get_wmma_layout(num_warps, packed, scale_preshuffle, instr_m=16, cga_layout=[]):
     assert (num_warps in (4, 8))
     assert (instr_m in (16, 32))
     if scale_preshuffle:
@@ -47,7 +52,56 @@ def get_wmma_layout(num_warps, packed, scale_preshuffle, instr_m=16):
 
     instr_shape = [instr_m, 16, 64] if packed else [instr_m, 16, 128]
 
-    return gl.amd.AMDWMMALayout(3, True, warp_bases, reg_bases, instr_shape)
+    return gl.amd.AMDWMMALayout(3, True, warp_bases, reg_bases, instr_shape, cga_layout)
+
+
+@dataclass(frozen=True, eq=True)
+class CGALayouts:
+    ctas_per_cga: List[int]
+    cga_layout_c: List[List[int]]
+    cga_layout_a: List[List[int]]
+    cga_layout_b: List[List[int]]
+    cga_layout_scale_a: List[List[int]]
+    cga_layout_scale_b: List[List[int]]
+
+    def __hash__(self):
+        return hash(
+            str(self.ctas_per_cga) + str(self.cga_layout_c) + str(self.cga_layout_a) + str(self.cga_layout_b) +
+            str(self.cga_layout_scale_a) + str(self.cga_layout_scale_b))
+
+
+def build_cga_layouts(ctas_per_cga):
+    cga_layout_c = make_cga_layout(ctas_per_cga, [ctas_per_cga[0], ctas_per_cga[1]], [0, 1])
+    cga_layout_a = make_cga_layout(ctas_per_cga, [ctas_per_cga[0], 1], [0, 1])
+    cga_layout_b = make_cga_layout(ctas_per_cga, [1, ctas_per_cga[1]], [0, 1])
+    cga_layout_scale_a = make_cga_layout(ctas_per_cga, [ctas_per_cga[0], 1], [0, 1])
+    cga_layout_scale_b = [[basis[1], 0] for basis in cga_layout_c]
+    return CGALayouts(ctas_per_cga, cga_layout_c, cga_layout_a, cga_layout_b, cga_layout_scale_a, cga_layout_scale_b)
+
+
+def _build_multi_cta_mxgemm_cases(per_cta_blocks, m_tiles=2, n_tiles=2, k_multiplier=4):
+    ctas_per_cga_list = [[2, 1], [2, 2], [4, 2]]
+    seen = set()
+    configs = []
+    for BLOCK_M, BLOCK_N, BLOCK_K in per_cta_blocks:
+        for ctas in ctas_per_cga_list:
+            num_ctas = ctas[0] * ctas[1]
+            if num_ctas == 16:
+                continue
+            M = BLOCK_M * ctas[0] * m_tiles
+            N = BLOCK_N * ctas[1] * n_tiles
+            K = BLOCK_K * k_multiplier
+            key = (M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, tuple(ctas))
+            if key not in seen:
+                seen.add(key)
+                configs.append((M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, ctas))
+    return configs
+
+
+_MULTI_CTA_BASELINE_CASES = _build_multi_cta_mxgemm_cases([(64, 64, 64), (128, 128, 128)])
+_MULTI_CTA_SLICE_CASES = _build_multi_cta_mxgemm_cases([(128, 128, 256)])
+_MULTI_CTA_8W_BASELINE_CASES = _build_multi_cta_mxgemm_cases([(128, 128, 128)])
+_MULTI_CTA_8W_SLICEK_CASES = _build_multi_cta_mxgemm_cases([(128, 128, 256)])
 
 
 @gluon.constexpr_function
@@ -115,7 +169,8 @@ class MXFPGEMMConfig:
     @gluon.constexpr_function
     def __init__(self, BLOCK_M, BLOCK_N, BLOCK_K, DTYPE_A, DTYPE_B, SCALE_BLOCK, NUM_BUFFERS, TRANSPOSE_B, WITH_A_SCALE,
                  SCALE_PRESHUFFLE, NUM_WARPS, TDM_WARP_USED_HINT=None, ASYNC_COPY_SCALE=False, NUM_SUBTILES=(1, 1, 1),
-                 L2_PREFETCH_DISTANCE=0, ACTIVATION="", RESOLVE_PARTITION_CONFLICTS=False, TDM_SPLIT=False):
+                 L2_PREFETCH_DISTANCE=0, ACTIVATION="", RESOLVE_PARTITION_CONFLICTS=False, TDM_SPLIT=False,
+                 CGA_LAYOUTS: gl.constexpr = None):
         self.BLOCK_M = gl.constexpr(BLOCK_M)
         self.BLOCK_N = gl.constexpr(BLOCK_N)
         self.BLOCK_K = gl.constexpr(BLOCK_K)
@@ -167,16 +222,15 @@ class MXFPGEMMConfig:
         LAYOUT_BLOCK_M = (BLOCK_M // NUM_SUBTILES_M) if TDM_SPLIT else BLOCK_M
         LAYOUT_BLOCK_N = (BLOCK_N // NUM_SUBTILES_N) if TDM_SPLIT else BLOCK_N
 
-        padded_a = gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_A, 16]], [LAYOUT_BLOCK_M, BLOCK_K_PACKED_A],
-                                                           [1, 0])
-        if TRANSPOSE_B:
-            padded_b = gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_B, 16]],
-                                                               [LAYOUT_BLOCK_N, BLOCK_K_PACKED_B], [1, 0])
-        else:
-            padded_b = gl.PaddedSharedLayout.with_identity_for([[LAYOUT_BLOCK_N, 16]],
-                                                               [BLOCK_K_PACKED_B, LAYOUT_BLOCK_N], [1, 0])
-
         if RESOLVE_PARTITION_CONFLICTS:
+            padded_a = gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_A, 16]],
+                                                               [LAYOUT_BLOCK_M, BLOCK_K_PACKED_A], [1, 0])
+            if TRANSPOSE_B:
+                padded_b = gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_B, 16]],
+                                                                   [LAYOUT_BLOCK_N, BLOCK_K_PACKED_B], [1, 0])
+            else:
+                padded_b = gl.PaddedSharedLayout.with_identity_for([[LAYOUT_BLOCK_N, 16]],
+                                                                   [BLOCK_K_PACKED_B, LAYOUT_BLOCK_N], [1, 0])
             # Split each operand tile along its M (A) / N (B) axis into partitioned
             # pieces and build a partition-aware WMMA layout to avoid LDS partition
             # conflicts.
@@ -192,10 +246,21 @@ class MXFPGEMMConfig:
             self.shared_layout_a = gl.constexpr(shared_a)
             self.shared_layout_b = gl.constexpr(shared_b)
         else:
-            WMMA_LAYOUT = get_wmma_layout(NUM_WARPS, False, SCALE_PRESHUFFLE, INSTR_M)
-            WMMA_LAYOUT_PACKED = get_wmma_layout(NUM_WARPS, True, SCALE_PRESHUFFLE, INSTR_M)
-            self.shared_layout_a = gl.constexpr(padded_a)
-            self.shared_layout_b = gl.constexpr(padded_b)
+            WMMA_LAYOUT = get_wmma_layout(NUM_WARPS, False, SCALE_PRESHUFFLE, INSTR_M, CGA_LAYOUTS.cga_layout_c)
+            WMMA_LAYOUT_PACKED = get_wmma_layout(NUM_WARPS, True, SCALE_PRESHUFFLE, INSTR_M, CGA_LAYOUTS.cga_layout_c)
+            self.shared_layout_a = gl.constexpr(
+                gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_A, 16]], [LAYOUT_BLOCK_M, BLOCK_K_PACKED_A],
+                                                        [1, 0], CGA_LAYOUTS.cga_layout_a))
+            if TRANSPOSE_B:
+                cga_layout_b = [[basis[1], basis[0]] for basis in CGA_LAYOUTS.cga_layout_b]
+                self.shared_layout_b = gl.constexpr(
+                    gl.PaddedSharedLayout.with_identity_for([[PAD_INTERVAL_B, 16]], [LAYOUT_BLOCK_N, BLOCK_K_PACKED_B],
+                                                            [1, 0], cga_layout_b))
+            else:
+                cga_layout_b = CGA_LAYOUTS.cga_layout_b
+                self.shared_layout_b = gl.constexpr(
+                    gl.PaddedSharedLayout.with_identity_for([[LAYOUT_BLOCK_N, 16]], [BLOCK_K_PACKED_B, LAYOUT_BLOCK_N],
+                                                            [1, 0], cga_layout_b))
 
         self.dot_layout_a = gl.constexpr(
             gl.DotOperandLayout(operand_index=0, parent=WMMA_LAYOUT_PACKED if DTYPE_A == "e2m1" else WMMA_LAYOUT,
@@ -211,12 +276,31 @@ class MXFPGEMMConfig:
                                                  [BLOCK_N // NUM_SUBTILES_N, BLOCK_K_SCALE // NUM_SUBTILES_K]))
         self.acc_layout = gl.constexpr(WMMA_LAYOUT)
 
-        self.shared_layout_a_scale = gl.constexpr(
-            gl.PaddedSharedLayout.with_identity_for([[256, 8]],
-                                                    [self.BLOCK_M_PRESHUFFLED, self.BLOCK_K_SCALE_PRESHUFFLED], [1, 0]))
-        self.shared_layout_b_scale = gl.constexpr(
-            gl.PaddedSharedLayout.with_identity_for([[256, 8]],
-                                                    [self.BLOCK_N_PRESHUFFLED, self.BLOCK_K_SCALE_PRESHUFFLED], [1, 0]))
+        if RESOLVE_PARTITION_CONFLICTS:
+            self.shared_layout_a_scale = gl.constexpr(
+                gl.PaddedSharedLayout.with_identity_for([[256, 8]],
+                                                        [self.BLOCK_M_PRESHUFFLED, self.BLOCK_K_SCALE_PRESHUFFLED],
+                                                        [1, 0]))
+            self.shared_layout_b_scale = gl.constexpr(
+                gl.PaddedSharedLayout.with_identity_for([[256, 8]],
+                                                        [self.BLOCK_N_PRESHUFFLED, self.BLOCK_K_SCALE_PRESHUFFLED],
+                                                        [1, 0]))
+        else:
+            self.shared_layout_a_scale = gl.constexpr(
+                gl.PaddedSharedLayout.with_identity_for([[256, 8]],
+                                                        [self.BLOCK_M_PRESHUFFLED, self.BLOCK_K_SCALE_PRESHUFFLED],
+                                                        [1, 0], CGA_LAYOUTS.cga_layout_scale_a))
+            self.shared_layout_b_scale = gl.constexpr(
+                gl.PaddedSharedLayout.with_identity_for([[256, 8]],
+                                                        [self.BLOCK_N_PRESHUFFLED, self.BLOCK_K_SCALE_PRESHUFFLED],
+                                                        [1, 0], CGA_LAYOUTS.cga_layout_scale_b))
+
+
+@gluon.jit
+def cluster_sync():
+    if gl.num_ctas() > 1:
+        cluster.arrive()
+        cluster.wait()
 
 
 @gluon.aggregate
@@ -553,6 +637,7 @@ class MXFPGEMMPipelinedProgram:
             load_idx = load_idx + 1
 
             gl.amd.gfx1250.tdm.async_wait((cfg.NUM_BUFFERS - 1) * self.cfg.NUM_LOADS_IN_BATCH)
+            cluster_sync()
 
             a, b, scale_a, scale_b = self.issue_local_loads(wmma_idx, self.a_buffer, self.b_buffer, self.a_scale_buffer,
                                                             self.b_scale_buffer)
@@ -600,6 +685,7 @@ class MXFPGEMMPipelinedProgram:
                 b_desc = self.issue_load_b_data(b_desc, load_idx, phase=phase)
 
             gl.amd.gfx1250.tdm.async_wait((cfg.NUM_BUFFERS - 2) * self.cfg.NUM_LOADS_IN_BATCH)
+            cluster_sync()
             with gl.amd.warp_pipeline_stage("wmma", priority=0):
                 self.issue_l2_prefetches(cfg.L2_PREFETCH_DISTANCE, load_idx)
                 load_idx = load_idx + 1
@@ -773,6 +859,7 @@ class MXFPGEMMSliceKProgram:
             accumulator = gl.amd.gfx1250.wmma_scaled(a1, scale_a1, cfg.DTYPE_A, b1, scale_b1, cfg.DTYPE_B, accumulator)
 
             gl.amd.gfx1250.tdm.async_wait((cfg.NUM_BUFFERS - 2) * cfg.NUM_LOADS_IN_BATCH)
+            cluster_sync()
             a0, b0, scale_a0, scale_b0 = self.issue_subtile_local_loads(wmma_idx, 0, self.a_buffer, self.b_buffer,
                                                                         self.a_scale_buffer, self.b_scale_buffer)
 
@@ -823,6 +910,7 @@ class MXFPGEMMSliceKProgram:
                                                                             self.a_scale_buffer, self.b_scale_buffer)
 
             gl.amd.gfx1250.tdm.async_wait((cfg.NUM_BUFFERS - 3) * self.cfg.NUM_LOADS_IN_BATCH)
+            cluster_sync()
             with gl.amd.warp_pipeline_stage("tdm+wmma+lds1", priority=0):
                 phase = wmma_idx + cfg.NUM_BUFFERS - 1
                 if cfg.WITH_A_SCALE:
@@ -959,9 +1047,13 @@ class MXFPGEMMSliceNKProgram:
         subtile_start_k: gl.constexpr = subtile_start_idx_k * SUBTILE_LEN_K
         subtile_start_n: gl.constexpr = subtile_start_idx_n * SUBTILE_LEN_N
         if cfg.TRANSPOSE_B:
-            b = b_buffer.index(wmma_idx % cfg.NUM_BUFFERS).slice(subtile_start_n, SUBTILE_LEN_N, 0) \
-            .slice(subtile_start_k // cfg.DIV_FACTOR_B, SUBTILE_LEN_K // cfg.DIV_FACTOR_B, 1) \
-            .permute([1, 0]).load(layout=cfg.dot_layout_b)
+            b_slice = b_buffer.index(wmma_idx % cfg.NUM_BUFFERS)
+            if cfg.CGA_LAYOUTS.ctas_per_cga[1] > 1:
+                b_slice = b_slice.cta_slice(subtile_start_n, SUBTILE_LEN_N, 0)
+            else:
+                b_slice = b_slice.slice(subtile_start_n, SUBTILE_LEN_N, 0)
+            b = b_slice.slice(subtile_start_k // cfg.DIV_FACTOR_B, SUBTILE_LEN_K // cfg.DIV_FACTOR_B, 1) \
+                .permute([1, 0]).load(layout=cfg.dot_layout_b)
         else:
             b = b_buffer.index(wmma_idx % cfg.NUM_BUFFERS).slice(subtile_start_k // cfg.DIV_FACTOR_B,
                                                                  SUBTILE_LEN_K // cfg.DIV_FACTOR_B, 0) \
@@ -975,8 +1067,12 @@ class MXFPGEMMSliceNKProgram:
                 cfg.PRESHUFFLE_FACTOR // 4,  #
                 4,  #
                 cfg.SCALE_KWIDTH)).permute((0, 3, 2, 1, 4)).reshape((cfg.BLOCK_N, BLOCK_K_SCALE))
-        b_scale_buffer_slice = b_scale_buffer_slice.slice(subtile_start_n, SUBTILE_LEN_N, 0) \
-            .slice(subtile_start_k // cfg.SCALE_BLOCK, SUBTILE_LEN_K // cfg.SCALE_BLOCK, 1)
+        if cfg.CGA_LAYOUTS.ctas_per_cga[1] > 1:
+            b_scale_buffer_slice = b_scale_buffer_slice.cta_slice(subtile_start_n, SUBTILE_LEN_N, 0)
+        else:
+            b_scale_buffer_slice = b_scale_buffer_slice.slice(subtile_start_n, SUBTILE_LEN_N, 0)
+        b_scale_buffer_slice = b_scale_buffer_slice.slice(subtile_start_k // cfg.SCALE_BLOCK,
+                                                          SUBTILE_LEN_K // cfg.SCALE_BLOCK, 1)
         scale_b = b_scale_buffer_slice.load(layout=cfg.layout_b_scale)
         return b, scale_b
 
@@ -1101,6 +1197,7 @@ class MXFPGEMMSliceNKProgram:
             pred_load = i + 1 - epilogue_lb
             pred_load = (pred_load >> 31) & 1
             self.async_wait(0)
+            cluster_sync()
             if cfg.WITH_A_SCALE:
                 a_scale_desc = self.issue_load_a_scale(a_scale_desc, load_idx, pred=pred_load)
             b_scale_desc = self.issue_load_b_scale(b_scale_desc, load_idx, pred=pred_load)
@@ -1190,8 +1287,12 @@ class MXFPGEMMSliceMNKProgram:
         BLOCK_K_SCALE: gl.constexpr = cfg.BLOCK_K // cfg.SCALE_BLOCK
         subtile_start_m: gl.constexpr = subtile_start_idx_m * SUBTILE_LEN_M
         subtile_start_k: gl.constexpr = subtile_start_idx_k * SUBTILE_LEN_K
-        a = a_buffer.index(wmma_idx % cfg.NUM_BUFFERS).slice(subtile_start_m, SUBTILE_LEN_M, 0) \
-            .slice(subtile_start_k // cfg.DIV_FACTOR_A, SUBTILE_LEN_K // cfg.DIV_FACTOR_A, 1) \
+        a_slice = a_buffer.index(wmma_idx % cfg.NUM_BUFFERS)
+        if cfg.CGA_LAYOUTS.ctas_per_cga[0] > 1:
+            a_slice = a_slice.cta_slice(subtile_start_m, SUBTILE_LEN_M, 0)
+        else:
+            a_slice = a_slice.slice(subtile_start_m, SUBTILE_LEN_M, 0)
+        a = a_slice.slice(subtile_start_k // cfg.DIV_FACTOR_A, SUBTILE_LEN_K // cfg.DIV_FACTOR_A, 1) \
             .load(layout=cfg.dot_layout_a)
         if cfg.WITH_A_SCALE:
             a_scale_buffer_slice = a_scale_buffer.index(wmma_idx % cfg.NUM_BUFFERS)
@@ -1202,8 +1303,12 @@ class MXFPGEMMSliceMNKProgram:
                     cfg.PRESHUFFLE_FACTOR // 4,  #
                     4,  #
                     cfg.SCALE_KWIDTH)).permute((0, 3, 2, 1, 4)).reshape((cfg.BLOCK_M, BLOCK_K_SCALE))
-            a_scale_buffer_slice = a_scale_buffer_slice.slice(subtile_start_m, SUBTILE_LEN_M, 0) \
-                .slice(subtile_start_k // cfg.SCALE_BLOCK, SUBTILE_LEN_K // cfg.SCALE_BLOCK, 1)
+            if cfg.CGA_LAYOUTS.ctas_per_cga[0] > 1:
+                a_scale_buffer_slice = a_scale_buffer_slice.cta_slice(subtile_start_m, SUBTILE_LEN_M, 0)
+            else:
+                a_scale_buffer_slice = a_scale_buffer_slice.slice(subtile_start_m, SUBTILE_LEN_M, 0)
+            a_scale_buffer_slice = a_scale_buffer_slice.slice(subtile_start_k // cfg.SCALE_BLOCK,
+                                                              SUBTILE_LEN_K // cfg.SCALE_BLOCK, 1)
             scale_a = a_scale_buffer_slice.load(layout=cfg.layout_a_scale)
         else:
             scale_a = 0
@@ -1222,14 +1327,21 @@ class MXFPGEMMSliceMNKProgram:
         subtile_start_k: gl.constexpr = subtile_start_idx_k * SUBTILE_LEN_K
         subtile_start_n: gl.constexpr = subtile_start_idx_n * SUBTILE_LEN_N
         if cfg.TRANSPOSE_B:
-            b = b_buffer.index(wmma_idx % cfg.NUM_BUFFERS).slice(subtile_start_n, SUBTILE_LEN_N, 0) \
-            .slice(subtile_start_k // cfg.DIV_FACTOR_B, SUBTILE_LEN_K // cfg.DIV_FACTOR_B, 1) \
-            .permute([1, 0]).load(layout=cfg.dot_layout_b)
+            b_slice = b_buffer.index(wmma_idx % cfg.NUM_BUFFERS)
+            if cfg.CGA_LAYOUTS.ctas_per_cga[1] > 1:
+                b_slice = b_slice.cta_slice(subtile_start_n, SUBTILE_LEN_N, 0)
+            else:
+                b_slice = b_slice.slice(subtile_start_n, SUBTILE_LEN_N, 0)
+            b = b_slice.slice(subtile_start_k // cfg.DIV_FACTOR_B, SUBTILE_LEN_K // cfg.DIV_FACTOR_B, 1) \
+                .permute([1, 0]).load(layout=cfg.dot_layout_b)
         else:
-            b = b_buffer.index(wmma_idx % cfg.NUM_BUFFERS).slice(subtile_start_k // cfg.DIV_FACTOR_B,
-                                                                 SUBTILE_LEN_K // cfg.DIV_FACTOR_B, 0) \
-            .slice(subtile_start_n, SUBTILE_LEN_N, 1) \
-            .load(layout=cfg.dot_layout_b)
+            b_slice = b_buffer.index(wmma_idx % cfg.NUM_BUFFERS)
+            if cfg.CGA_LAYOUTS.ctas_per_cga[1] > 1:
+                b_slice = b_slice.cta_slice(subtile_start_n, SUBTILE_LEN_N, 1)
+            else:
+                b_slice = b_slice.slice(subtile_start_n, SUBTILE_LEN_N, 1)
+            b = b_slice.slice(subtile_start_k // cfg.DIV_FACTOR_B, SUBTILE_LEN_K // cfg.DIV_FACTOR_B,
+                              0).load(layout=cfg.dot_layout_b)
         b_scale_buffer_slice = b_scale_buffer.index(wmma_idx % cfg.NUM_BUFFERS)
         if cfg.SCALE_PRESHUFFLE:
             b_scale_buffer_slice = b_scale_buffer_slice.reshape((
@@ -1238,8 +1350,12 @@ class MXFPGEMMSliceMNKProgram:
                 cfg.PRESHUFFLE_FACTOR // 4,  #
                 4,  #
                 cfg.SCALE_KWIDTH)).permute((0, 3, 2, 1, 4)).reshape((cfg.BLOCK_N, BLOCK_K_SCALE))
-        b_scale_buffer_slice = b_scale_buffer_slice.slice(subtile_start_n, SUBTILE_LEN_N, 0) \
-            .slice(subtile_start_k // cfg.SCALE_BLOCK, SUBTILE_LEN_K // cfg.SCALE_BLOCK, 1)
+        if cfg.CGA_LAYOUTS.ctas_per_cga[1] > 1:
+            b_scale_buffer_slice = b_scale_buffer_slice.cta_slice(subtile_start_n, SUBTILE_LEN_N, 0)
+        else:
+            b_scale_buffer_slice = b_scale_buffer_slice.slice(subtile_start_n, SUBTILE_LEN_N, 0)
+        b_scale_buffer_slice = b_scale_buffer_slice.slice(subtile_start_k // cfg.SCALE_BLOCK,
+                                                          SUBTILE_LEN_K // cfg.SCALE_BLOCK, 1)
         scale_b = b_scale_buffer_slice.load(layout=cfg.layout_b_scale)
         return b, scale_b
 
@@ -1432,6 +1548,7 @@ class MXFPGEMMSliceMNKProgram:
             a_desc, b_desc = self.issue_load_data(a_desc, b_desc, load_idx, pred=pred_load)
 
             self.async_wait((cfg.NUM_BUFFERS - 1) * 2)
+            cluster_sync()
 
             a00, scale_a00 = self.issue_local_load_a(wmma_idx, 0, 0, self.a_buffer, self.a_scale_buffer)
             b00, scale_b00 = self.issue_local_load_b(wmma_idx, 0, 0, self.b_buffer, self.b_scale_buffer)
@@ -1976,7 +2093,8 @@ def mxgemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, 
                                 ASYNC_COPY_SCALE: gl.constexpr, WITH_A_SCALE: gl.constexpr, SCHEDULE: gl.constexpr,
                                 NUM_WARPS: gl.constexpr, PINGPONG: gl.constexpr, L2_PREFETCH_DISTANCE: gl.constexpr = 0,
                                 ACTIVATION: gl.constexpr = "", PARTIAL_TDM: gl.constexpr = False,
-                                RESOLVE_PARTITION_CONFLICTS: gl.constexpr = False, TDM_SPLIT: gl.constexpr = False):
+                                RESOLVE_PARTITION_CONFLICTS: gl.constexpr = False, TDM_SPLIT: gl.constexpr = False,
+                                CGA_LAYOUTS: gl.constexpr = None):
 
     if PINGPONG:
         gl.static_assert(NUM_WARPS == 8 and (SCHEDULE == 'baseline' or SCHEDULE == 'sliceK'))
@@ -2012,7 +2130,7 @@ def mxgemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, 
 
     cfg = MXFPGEMMConfig(BLOCK_M, BLOCK_N_PACKED, BLOCK_K, DTYPE_A, DTYPE_B, SCALE_BLOCK, NUM_BUFFERS, TRANSPOSE_B,
                          WITH_A_SCALE, SCALE_PRESHUFFLE, NUM_WARPS, TDM_WARP_USED_HINT, ASYNC_COPY_SCALE, NUM_SUBTILES,
-                         L2_PREFETCH_DISTANCE, ACTIVATION, RESOLVE_PARTITION_CONFLICTS, TDM_SPLIT)
+                         L2_PREFETCH_DISTANCE, ACTIVATION, RESOLVE_PARTITION_CONFLICTS, TDM_SPLIT, CGA_LAYOUTS)
 
     pid = gl.program_id(axis=0)
     num_pid_m = gl.cdiv(M, BLOCK_M)
@@ -2033,7 +2151,9 @@ def mxgemm_tdm_pipelined_kernel(a_ptr, b_ptr, c_ptr, a_scale, b_scale, M, N, K, 
                                                                           N_PACKED, K, stride_am, stride_ak, stride_bk,
                                                                           stride_bn, stride_scale)
 
-    shared_layout_acc: gl.constexpr = gl.SwizzledSharedLayout(1, 1, 1, [1, 0])
+    # All schedules store C through TDM: build a C tensor descriptor over the
+    # (output-width) C matrix and pass the tile offsets to the program.
+    shared_layout_acc: gl.constexpr = gl.SwizzledSharedLayout(1, 1, 1, [1, 0], CGA_LAYOUTS.cga_layout_c)
     c_desc = gl.amd.gfx1250.tdm.make_tensor_descriptor(base=c_ptr, shape=(M, N), strides=(stride_cm, stride_cn),
                                                        block_shape=(BLOCK_M, BLOCK_N), layout=shared_layout_acc)
     c_off_m = pid_m * BLOCK_M
@@ -2146,10 +2266,16 @@ def test_runtime_mxgemm_tdm_8warps_pipeline(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, 
                                             NUM_BUFFERS, SCALE_PRESHUFFLE, WITH_A_SCALE, SCHEDULE, ASYNC_COPY_SCALE,
                                             GROUP_SIZE_M, PINGPONG, L2_PREFETCH_DISTANCE,
                                             RESOLVE_PARTITION_CONFLICTS=False, PARTIAL_TDM=False, BENCHMARK_MODE=None,
-                                            BENCHMARK_NUM_ITERS=32):
+                                            BENCHMARK_NUM_ITERS=32, ctas_per_cga=(1, 1)):
     SCALE_BLOCK = 32
     numWarps = 8
-    numCtas = 1
+    numCtas = ctas_per_cga[0] * ctas_per_cga[1]
+
+    if numCtas > 1 and RESOLVE_PARTITION_CONFLICTS:
+        pytest.skip("NYI: RESOLVE_PARTITION_CONFLICTS not supported with multi-CTA")
+
+    if numCtas > 1 and PINGPONG:
+        pytest.skip("Skip pingpong with multi-CTA to reduce LDS pressure")
 
     torch.manual_seed(0)
 
@@ -2215,17 +2341,32 @@ def test_runtime_mxgemm_tdm_8warps_pipeline(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, 
     stride_cm, stride_cn = c_d.stride(0), c_d.stride(1)
     stride_scale = b_scale_d.stride(0)
 
-    numBlocks = triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)
+    num_blk_m = triton.cdiv(M, BLOCK_M)
+    num_blk_n = triton.cdiv(N, BLOCK_N)
+    if numCtas > 1:
+        if num_blk_m % ctas_per_cga[0]:
+            pytest.skip("number of block on M dimension does not divide cluster size")
+        if num_blk_n % ctas_per_cga[1]:
+            pytest.skip("number of block on N dimension does not divide cluster size")
+
+        BLOCK_M *= ctas_per_cga[0]
+        BLOCK_N *= ctas_per_cga[1]
+        num_blk_m //= ctas_per_cga[0]
+        num_blk_n //= ctas_per_cga[1]
+
+    numBlocks = num_blk_m * num_blk_n
     grid = [numBlocks, 1, 1]
 
     dtype_converter = {'float8_e5m2': "e5m2", "float8_e4m3": "e4m3", "float4": "e2m1"}
+    cga_layouts = build_cga_layouts(ctas_per_cga)
 
-    fn = lambda: mxgemm_tdm_pipelined_kernel[grid](
-        a_d, b_d, c_d, a_scale_d, b_scale_d, M, N, K, stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
-        stride_scale, dtype_converter[DTYPE_A], dtype_converter[DTYPE_B], SCALE_BLOCK, BLOCK_M, BLOCK_N, BLOCK_K,
-        GROUP_SIZE_M, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, ASYNC_COPY_SCALE, WITH_A_SCALE, SCHEDULE, numWarps,
-        PINGPONG, L2_PREFETCH_DISTANCE=L2_PREFETCH_DISTANCE, PARTIAL_TDM=PARTIAL_TDM, RESOLVE_PARTITION_CONFLICTS=
-        RESOLVE_PARTITION_CONFLICTS, num_warps=numWarps, num_ctas=numCtas, waves_per_eu=(numWarps // 4))
+    fn = lambda: mxgemm_tdm_pipelined_kernel[
+        grid](a_d, b_d, c_d, a_scale_d, b_scale_d, M, N, K, stride_am, stride_ak, stride_bk, stride_bn, stride_cm,
+              stride_cn, stride_scale, dtype_converter[DTYPE_A], dtype_converter[
+                  DTYPE_B], SCALE_BLOCK, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_SIZE_M, TRANSPOSE_B, NUM_BUFFERS,
+              SCALE_PRESHUFFLE, ASYNC_COPY_SCALE, WITH_A_SCALE, SCHEDULE, numWarps, PINGPONG, L2_PREFETCH_DISTANCE=
+              L2_PREFETCH_DISTANCE, PARTIAL_TDM=PARTIAL_TDM, RESOLVE_PARTITION_CONFLICTS=RESOLVE_PARTITION_CONFLICTS,
+              CGA_LAYOUTS=cga_layouts, num_warps=numWarps, num_ctas=numCtas, waves_per_eu=(numWarps // 4))
 
     if BENCHMARK_MODE == 'graph':
         time = triton.testing.do_bench_cudagraph(fn, rep=BENCHMARK_NUM_ITERS)
@@ -2277,7 +2418,7 @@ def test_runtime_mxgemm_tdm_8warps_pipeline(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, 
 def test_runtime_mxgemm_tdm_pipelined(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, TRANSPOSE_B, NUM_BUFFERS,
                                       SCALE_PRESHUFFLE, WITH_A_SCALE, SCHEDULE, ASYNC_COPY_SCALE, GROUP_SIZE_M,
                                       L2_PREFETCH_DISTANCE, ACTIVATION, PARTIAL_TDM, RESOLVE_PARTITION_CONFLICTS,
-                                      TDM_SPLIT, BENCHMARK_MODE=None, BENCHMARK_NUM_ITERS=32):
+                                      TDM_SPLIT, BENCHMARK_MODE=None, BENCHMARK_NUM_ITERS=32, ctas_per_cga=(1, 1)):
     """
     Pipelined mxfp GEMM with optional fused SwiGLU epilogue.
 
@@ -2286,10 +2427,16 @@ def test_runtime_mxgemm_tdm_pipelined(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_
     """
     SCALE_BLOCK = 32
     numWarps = 4
-    numCtas = 1
+    numCtas = ctas_per_cga[0] * ctas_per_cga[1]
     IS_SWIGLU = ACTIVATION == "swiglu"
     EFFECTIVE_BLOCK_N = BLOCK_N * 2 if IS_SWIGLU else BLOCK_N
     is_fp4fp4 = DTYPE_A == "float4" and DTYPE_B == "float4"
+
+    if RESOLVE_PARTITION_CONFLICTS and numCtas > 1:
+        pytest.skip("NYI: RESOLVE_PARTITION_CONFLICTS not supported with multi-CTA")
+
+    if numCtas > 1 and ACTIVATION != "":
+        pytest.skip("Skip tests with multiple CTAs and fused activation")
 
     if RESOLVE_PARTITION_CONFLICTS and SCHEDULE != "sliceMNK":
         pytest.skip("Only test RESOLVE_PARTITION_CONFLICTS in sliceMNK schedule")
@@ -2320,7 +2467,8 @@ def test_runtime_mxgemm_tdm_pipelined(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_
         pytest.skip("Skip large block size with >=3 buffers to not exceed lds limit")
 
     if SCHEDULE == 'sliceNK':
-        if BLOCK_K < 256 or EFFECTIVE_BLOCK_N < 256:
+        cluster_block_n = EFFECTIVE_BLOCK_N * ctas_per_cga[1]
+        if BLOCK_K < 256 or cluster_block_n < 256:
             pytest.skip('BLOCK_K and BLOCK_N are too small for sliceNK schedule')
         if M < 256:
             pytest.skip('Skip small problem size to reduce test cases')
@@ -2403,18 +2551,32 @@ def test_runtime_mxgemm_tdm_pipelined(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_
     stride_cm, stride_cn = c_d.stride(0), c_d.stride(1)
     stride_scale = b_scale_d.stride(0)
 
-    numBlocks = triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)
+    num_blk_m = triton.cdiv(M, BLOCK_M)
+    num_blk_n = triton.cdiv(N, BLOCK_N)
+    if numCtas > 1:
+        if num_blk_m % ctas_per_cga[0]:
+            pytest.skip("number of block on M dimension does not divide cluster size")
+        if num_blk_n % ctas_per_cga[1]:
+            pytest.skip("number of block on N dimension does not divide cluster size")
+
+        BLOCK_M *= ctas_per_cga[0]
+        BLOCK_N *= ctas_per_cga[1]
+        num_blk_m //= ctas_per_cga[0]
+        num_blk_n //= ctas_per_cga[1]
+
+    numBlocks = num_blk_m * num_blk_n
     grid = [numBlocks, 1, 1]
 
     dtype_converter = {'float8_e5m2': "e5m2", "float8_e4m3": "e4m3", "float4": "e2m1"}
+    cga_layouts = build_cga_layouts(ctas_per_cga)
 
-    fn = lambda: mxgemm_tdm_pipelined_kernel[
-        grid](a_d, b_d, c_d, a_scale_d, b_scale_d, M, N, K, stride_am, stride_ak, stride_bk, stride_bn, stride_cm,
-              stride_cn, stride_scale, dtype_converter[DTYPE_A], dtype_converter[DTYPE_B], SCALE_BLOCK, BLOCK_M,
-              BLOCK_N, BLOCK_K, GROUP_SIZE_M, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, ASYNC_COPY_SCALE,
-              WITH_A_SCALE, SCHEDULE, NUM_WARPS=numWarps, PINGPONG=False, L2_PREFETCH_DISTANCE=L2_PREFETCH_DISTANCE,
-              ACTIVATION=ACTIVATION, PARTIAL_TDM=PARTIAL_TDM, RESOLVE_PARTITION_CONFLICTS=RESOLVE_PARTITION_CONFLICTS,
-              TDM_SPLIT=TDM_SPLIT, num_warps=numWarps, num_ctas=numCtas, waves_per_eu=numWarps // 4)
+    fn = lambda: mxgemm_tdm_pipelined_kernel[grid](
+        a_d, b_d, c_d, a_scale_d, b_scale_d, M, N, K, stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
+        stride_scale, dtype_converter[DTYPE_A], dtype_converter[DTYPE_B], SCALE_BLOCK, BLOCK_M, BLOCK_N, BLOCK_K,
+        GROUP_SIZE_M, TRANSPOSE_B, NUM_BUFFERS, SCALE_PRESHUFFLE, ASYNC_COPY_SCALE, WITH_A_SCALE, SCHEDULE, NUM_WARPS=
+        numWarps, PINGPONG=False, L2_PREFETCH_DISTANCE=L2_PREFETCH_DISTANCE, ACTIVATION=ACTIVATION, PARTIAL_TDM=
+        PARTIAL_TDM, RESOLVE_PARTITION_CONFLICTS=RESOLVE_PARTITION_CONFLICTS, TDM_SPLIT=TDM_SPLIT, CGA_LAYOUTS=
+        cga_layouts, num_warps=numWarps, num_ctas=numCtas, waves_per_eu=numWarps // 4)
 
     if BENCHMARK_MODE == 'graph':
         time = triton.testing.do_bench_cudagraph(fn, rep=BENCHMARK_NUM_ITERS)
@@ -2448,6 +2610,101 @@ def test_runtime_mxgemm_tdm_pipelined(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_
         else:
             torch.testing.assert_close(c_d.cpu(), c_ref.cpu(), rtol=1e-5, atol=1e-8)
         print('✅Pass')
+
+
+@pytest.mark.parametrize("DTYPE_A, DTYPE_B",
+                         [['float8_e4m3', 'float8_e5m2'], ['float4', 'float8_e4m3'], ['float4', 'float4']])
+@pytest.mark.parametrize("NUM_BUFFERS", [2, 4])
+@pytest.mark.parametrize("TRANSPOSE_B", [True, False])
+@pytest.mark.parametrize("SCALE_PRESHUFFLE", [True, False])
+@pytest.mark.parametrize("WITH_A_SCALE", [True, False])
+@pytest.mark.parametrize("L2_PREFETCH_DISTANCE", [-1, 0])
+@pytest.mark.parametrize("M,N,K,BLOCK_M,BLOCK_N,BLOCK_K,ctas_per_cga", _MULTI_CTA_BASELINE_CASES)
+def test_runtime_mxgemm_tdm_pipelined_multi_cta_baseline(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K,
+                                                         NUM_BUFFERS, TRANSPOSE_B, SCALE_PRESHUFFLE, WITH_A_SCALE,
+                                                         L2_PREFETCH_DISTANCE, ctas_per_cga):
+    test_runtime_mxgemm_tdm_pipelined(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, TRANSPOSE_B, NUM_BUFFERS,
+                                      SCALE_PRESHUFFLE, WITH_A_SCALE, 'baseline', False, 8, L2_PREFETCH_DISTANCE, '',
+                                      False, False, False, ctas_per_cga=ctas_per_cga)
+
+
+@pytest.mark.parametrize("DTYPE_A, DTYPE_B", [['float8_e4m3', 'float8_e5m2'], ['float4', 'float8_e4m3']])
+@pytest.mark.parametrize("NUM_BUFFERS", [2, 3])
+@pytest.mark.parametrize("WITH_A_SCALE", [True, False])
+@pytest.mark.parametrize("L2_PREFETCH_DISTANCE", [-1, 0])
+@pytest.mark.parametrize("M,N,K,BLOCK_M,BLOCK_N,BLOCK_K,ctas_per_cga", _MULTI_CTA_SLICE_CASES)
+def test_runtime_mxgemm_tdm_pipelined_multi_cta_sliceK(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K,
+                                                       NUM_BUFFERS, WITH_A_SCALE, L2_PREFETCH_DISTANCE, ctas_per_cga):
+    test_runtime_mxgemm_tdm_pipelined(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, True, NUM_BUFFERS, True,
+                                      WITH_A_SCALE, 'sliceK', False, 8, L2_PREFETCH_DISTANCE, '', False, False, False,
+                                      ctas_per_cga=ctas_per_cga)
+
+
+@pytest.mark.parametrize("DTYPE_A, DTYPE_B", [['float8_e4m3', 'float8_e5m2'], ['float4', 'float8_e4m3']])
+@pytest.mark.parametrize("NUM_BUFFERS", [2])
+@pytest.mark.parametrize("WITH_A_SCALE", [True, False])
+@pytest.mark.parametrize("ASYNC_COPY_SCALE", [False, True])
+@pytest.mark.parametrize("L2_PREFETCH_DISTANCE", [0])
+@pytest.mark.parametrize("M,N,K,BLOCK_M,BLOCK_N,BLOCK_K,ctas_per_cga", _MULTI_CTA_SLICE_CASES)
+def test_runtime_mxgemm_tdm_pipelined_multi_cta_sliceNK(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K,
+                                                        NUM_BUFFERS, WITH_A_SCALE, ASYNC_COPY_SCALE,
+                                                        L2_PREFETCH_DISTANCE, ctas_per_cga):
+    test_runtime_mxgemm_tdm_pipelined(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, True, NUM_BUFFERS, True,
+                                      WITH_A_SCALE, 'sliceNK', ASYNC_COPY_SCALE, 8, L2_PREFETCH_DISTANCE, '', False,
+                                      False, False, ctas_per_cga=ctas_per_cga)
+
+
+@pytest.mark.parametrize("DTYPE_A, DTYPE_B", [['float8_e4m3', 'float8_e5m2'], ['float4', 'float8_e4m3']])
+@pytest.mark.parametrize("NUM_BUFFERS", [2])
+@pytest.mark.parametrize("WITH_A_SCALE", [True, False])
+@pytest.mark.parametrize("L2_PREFETCH_DISTANCE", [0])
+@pytest.mark.parametrize("M,N,K,BLOCK_M,BLOCK_N,BLOCK_K,ctas_per_cga", _MULTI_CTA_SLICE_CASES)
+def test_runtime_mxgemm_tdm_pipelined_multi_cta_sliceMNK(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K,
+                                                         NUM_BUFFERS, WITH_A_SCALE, L2_PREFETCH_DISTANCE, ctas_per_cga):
+    test_runtime_mxgemm_tdm_pipelined(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, True, NUM_BUFFERS, True,
+                                      WITH_A_SCALE, 'sliceMNK', False, 8, L2_PREFETCH_DISTANCE, '', False, False, False,
+                                      ctas_per_cga=ctas_per_cga)
+
+
+@pytest.mark.parametrize("DTYPE_A, DTYPE_B", [['float8_e4m3', 'float8_e5m2'], ['float4', 'float8_e4m3']])
+@pytest.mark.parametrize("NUM_BUFFERS", [2, 4])
+@pytest.mark.parametrize("WITH_A_SCALE", [True, False])
+@pytest.mark.parametrize("L2_PREFETCH_DISTANCE", [-1, 0])
+@pytest.mark.parametrize("M,N,K,BLOCK_M,BLOCK_N,BLOCK_K,ctas_per_cga", _MULTI_CTA_8W_BASELINE_CASES)
+def test_runtime_mxgemm_tdm_8warps_pipeline_multi_cta_baseline(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K,
+                                                               NUM_BUFFERS, WITH_A_SCALE, L2_PREFETCH_DISTANCE,
+                                                               ctas_per_cga):
+    test_runtime_mxgemm_tdm_8warps_pipeline(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, True, NUM_BUFFERS,
+                                            True, WITH_A_SCALE, 'baseline', False, 8, False, L2_PREFETCH_DISTANCE,
+                                            ctas_per_cga=ctas_per_cga)
+
+
+@pytest.mark.parametrize("DTYPE_A, DTYPE_B", [['float8_e4m3', 'float8_e5m2'], ['float4', 'float8_e4m3']])
+@pytest.mark.parametrize("NUM_BUFFERS", [2, 4])
+@pytest.mark.parametrize("WITH_A_SCALE", [True, False])
+@pytest.mark.parametrize("L2_PREFETCH_DISTANCE", [-1, 0])
+@pytest.mark.parametrize("M,N,K,BLOCK_M,BLOCK_N,BLOCK_K,ctas_per_cga", _MULTI_CTA_8W_SLICEK_CASES)
+def test_runtime_mxgemm_tdm_8warps_pipeline_multi_cta_sliceK(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K,
+                                                             NUM_BUFFERS, WITH_A_SCALE, L2_PREFETCH_DISTANCE,
+                                                             ctas_per_cga):
+    test_runtime_mxgemm_tdm_8warps_pipeline(DTYPE_A, DTYPE_B, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, True, NUM_BUFFERS,
+                                            True, WITH_A_SCALE, 'sliceK', False, 8, False, L2_PREFETCH_DISTANCE,
+                                            ctas_per_cga=ctas_per_cga)
+
+
+@pytest.mark.parametrize("NUM_BUFFERS", [2, 3])
+@pytest.mark.parametrize("ctas_per_cga", [[2, 1], [2, 2]])
+def test_runtime_mxgemm_tdm_slicek_three_k_tiles_multi_cta(NUM_BUFFERS, ctas_per_cga):
+    M = 128 * ctas_per_cga[0] * 2
+    N = 128 * ctas_per_cga[1] * 2
+    test_runtime_mxgemm_tdm_pipelined('float8_e4m3', 'float8_e5m2', M, N, 768, 128, 128, 256, True, NUM_BUFFERS, True,
+                                      True, 'sliceK', False, 8, 0, '', False, False, False, ctas_per_cga=ctas_per_cga)
+
+
+@pytest.mark.parametrize("NUM_BUFFERS", [2, 3])
+def test_runtime_mxgemm_tdm_slicek_three_k_tiles(NUM_BUFFERS):
+    test_runtime_mxgemm_tdm_pipelined('float8_e4m3', 'float8_e5m2', 256, 256, 768, 128, 128, 256, True, NUM_BUFFERS,
+                                      True, True, 'sliceK', False, 8, 0, '', False, False, False)
 
 
 if __name__ == '__main__':
@@ -2498,8 +2755,21 @@ if __name__ == '__main__':
         default=32,
         help="Number of iterations (rep) to run when benchmarking.",
     )
+    parser.add_argument("--ctas-per-cga", type=int, nargs=2, default=[1, 1],
+                        help='CTA arrangement per CGA as [M, N]. Defaults to [1, 1]')
     args = parser.parse_args()
     BENCHMARK_MODE = None if args.benchmark_mode == "none" else args.benchmark_mode
+    ctas_per_cga = args.ctas_per_cga
+    NUM_CTAS = ctas_per_cga[0] * ctas_per_cga[1]
+
+    if NUM_CTAS not in [1, 2, 4, 8, 16]:
+        raise ValueError(f"NUM_CTAS (product of CTAS_PER_CGA) {NUM_CTAS} not supported")
+
+    if args.resolve_partition_conflicts and NUM_CTAS > 1:
+        raise ValueError("RESOLVE_PARTITION_CONFLICTS is not supported with multi-CTA")
+
+    if NUM_CTAS > 1 and not is_hip_gfx1250():
+        raise ValueError("multi-CTA requires GFX1250")
 
     if args.pingpong:
         assert (args.num_warps == 8 and (args.schedule == 'baseline' or args.schedule == 'sliceK'))
@@ -2521,7 +2791,8 @@ if __name__ == '__main__':
                                                 PARTIAL_TDM=args.partial_tdm,  #
                                                 RESOLVE_PARTITION_CONFLICTS=args.resolve_partition_conflicts,  #
                                                 BENCHMARK_MODE=BENCHMARK_MODE,  #
-                                                BENCHMARK_NUM_ITERS=args.benchmark_num_iters)
+                                                BENCHMARK_NUM_ITERS=args.benchmark_num_iters,  #
+                                                ctas_per_cga=ctas_per_cga)
     else:
         assert (args.num_buffers in (2, 3, 4))
         test_runtime_mxgemm_tdm_pipelined(args.dtype_a, args.dtype_b,  #
@@ -2540,4 +2811,5 @@ if __name__ == '__main__':
                                           RESOLVE_PARTITION_CONFLICTS=args.resolve_partition_conflicts,  #
                                           BENCHMARK_MODE=BENCHMARK_MODE,  #
                                           BENCHMARK_NUM_ITERS=args.benchmark_num_iters,  #
-                                          TDM_SPLIT=args.tdm_split)
+                                          TDM_SPLIT=args.tdm_split,  #
+                                          ctas_per_cga=ctas_per_cga)

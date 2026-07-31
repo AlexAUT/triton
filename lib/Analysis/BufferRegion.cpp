@@ -273,8 +273,8 @@ struct MemDescSubsliceOffsets {
   uint32_t ctaOffset = 0;
 };
 
-MemDescSubsliceOffsets
-getMemDescSubsliceUnpaddedOffsets(ttg::MemDescSubsliceOp op) {
+template <typename SubsliceOp>
+MemDescSubsliceOffsets getMemDescSubsliceUnpaddedOffsets(SubsliceOp op) {
   auto srcTy = op.getSrc().getType();
   auto offsets = op.getOffsets();
   if (offsets.empty())
@@ -599,6 +599,20 @@ LogicalResult BufferRegionAnalysis::visitOperation(
       regionInfo.views.insert(getMemDescView(
           view.storageBase, view.affineOffset ^ relativeOffset.byteOffset,
           memdescSubsliceOp.getType(), &footprintCache, view.partitionBases,
+          view.affinePartitionOffset ^ relativeOffset.partitionOffset,
+          view.affineCTAOffset ^ relativeOffset.ctaOffset));
+    return propagateRegions(regionInfo);
+  }
+  if (auto ctaSubsliceOp = dyn_cast<ttg::MemDescCTASubsliceOp>(op)) {
+    const RegionInfo &in = operands[0]->getValue();
+    if (in.isUnknown())
+      return propagateRegions(in);
+    MemDescSubsliceOffsets relativeOffset =
+        getMemDescSubsliceUnpaddedOffsets(ctaSubsliceOp);
+    for (const BufferRegionView &view : in.views)
+      regionInfo.views.insert(getMemDescView(
+          view.storageBase, view.affineOffset ^ relativeOffset.byteOffset,
+          ctaSubsliceOp.getType(), &footprintCache, view.partitionBases,
           view.affinePartitionOffset ^ relativeOffset.partitionOffset,
           view.affineCTAOffset ^ relativeOffset.ctaOffset));
     return propagateRegions(regionInfo);

@@ -558,6 +558,62 @@ struct MemDescSubsliceOpConversion
   }
 };
 
+struct MemDescCTASubsliceOpConversion
+    : public ConvertOpToLLVMPattern<triton::gpu::MemDescCTASubsliceOp> {
+  using ConvertOpToLLVMPattern<
+      triton::gpu::MemDescCTASubsliceOp>::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::MemDescCTASubsliceOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op->getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    auto *ctx = op.getContext();
+    auto srcTy = op.getSrc().getType();
+    auto llvmElemTy = getTypeConverter()->convertType(srcTy.getElementType());
+    auto smemObj = getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
+                                                   llvmElemTy, rewriter);
+    if (smemObj.getBases().size() != 1)
+      return rewriter.notifyMatchFailure(
+          op, "CTA-local subslice does not support partitioned shared "
+              "encodings");
+
+    auto opOffsets = op.getOffsets();
+    LinearLayout ll = triton::gpu::paddedLinearLayout(srcTy);
+    auto dimNames = standardOutDimNames(ctx, opOffsets.size());
+    SmallVector<std::pair<StringAttr, int32_t>> namedOffsets;
+    for (auto [dim, offset] : llvm::zip(dimNames, opOffsets))
+      namedOffsets.push_back({dim, offset});
+    auto physical = ll.pseudoinvert().apply(namedOffsets);
+    auto findPhysical = [&](StringRef name) {
+      auto dim = StringAttr::get(ctx, name);
+      auto it = llvm::find_if(physical,
+                              [&](auto value) { return value.first == dim; });
+      assert(it != physical.end());
+      return it->second;
+    };
+    int32_t localOffset = findPhysical("offset");
+    if (findPhysical("block") != 0)
+      return rewriter.notifyMatchFailure(
+          op, "CTA-local offset unexpectedly selects another CTA");
+
+    auto paddingShifts = getPaddedSharedShifts(srcTy.getEncoding(),
+                                               srcTy.getElementTypeBitWidth(),
+                                               /*offsetInBytes=*/false);
+    localOffset = applyPadding(localOffset, paddingShifts);
+
+    SmallVector<Value> newBases;
+    for (Value base : smemObj.getBases())
+      newBases.push_back(
+          b.gep(base.getType(), llvmElemTy, base, b.i32_val(localOffset)));
+    SmallVector<Value> zeroOffsets(opOffsets.size(), b.i32_val(0));
+    auto localObj = SharedMemoryObject(newBases, llvmElemTy, zeroOffsets);
+    rewriter.replaceOp(
+        op, getStructFromSharedMemoryObject(loc, localObj, rewriter));
+    return success();
+  }
+};
+
 struct MemDescReinterpretOpConversion
     : public ConvertOpToLLVMPattern<MemDescReinterpretOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -603,7 +659,7 @@ void mlir::triton::populateViewOpToLLVMPatterns(
       typeConverter, benefit);
   patterns.add<TransOpConversion>(typeConverter, benefit);
   patterns.add<BroadcastOpConversion>(typeConverter, benefit);
-  patterns.add<MemDescSubsliceOpConversion, MemDescIndexOpConversion>(
-      typeConverter, benefit);
+  patterns.add<MemDescSubsliceOpConversion, MemDescCTASubsliceOpConversion,
+               MemDescIndexOpConversion>(typeConverter, benefit);
   patterns.add<MemDescReinterpretOpConversion>(typeConverter, benefit);
 }

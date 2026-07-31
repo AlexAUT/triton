@@ -155,6 +155,20 @@ module attributes {"ttg.target" = "cuda:0", "ttg.num-ctas" = 2 : i32, "ttg.num-w
 
 // -----
 
+#cta_local_src = #ttg.padded_shared<[4:+1] {offset = [[1], [2]], block = [[4]]}>
+#cta_local_dst = #ttg.padded_shared<[4:+1] {offset = [[1]], block = [[2]]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.target" = "cuda:0", "ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @cta_local_subslice
+  tt.func @cta_local_subslice(%arg0: !ttg.memdesc<8xf32, #cta_local_src, #smem>) {
+    // CHECK: ttg.memdesc_cta_subslice %{{.*}}[2]
+    %0 = ttg.memdesc_cta_subslice %arg0[2] : !ttg.memdesc<8xf32, #cta_local_src, #smem> -> !ttg.memdesc<4xf32, #cta_local_dst, #smem>
+    tt.return
+  }
+}
+
+// -----
+
 #shared = #ttg.padded_shared<[4:+4] {offset=[[1, 0], [2, 0], [0, 1], [0, 2]], block=[]}>
 #smem = #ttg.shared_memory
 module attributes {"ttg.target" = "gfx950", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 64 : i32} {

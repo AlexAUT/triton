@@ -422,6 +422,69 @@ class GluonSemantic(TritonSemantic[TensorTy]):
         handle = builder.create_memdesc_subslice(ty.to_ir(builder), mem_desc.handle, offsets)
         return ttgl.shared_memory_descriptor(handle, **ty.__dict__)
 
+    def memdesc_cta_slice(self, mem_desc, start, length, dim):
+        _check(isinstance(start, int), lambda: f"expected 'start' to be an int but got {start}")
+        _check(isinstance(length, int), lambda: f"expected 'length' to be an int but got {length}")
+        _check(isinstance(dim, int), lambda: f"expected 'dim' to be an int but got {dim}")
+        _check(0 <= dim < mem_desc.rank, lambda: f"expected 'dim' in [0, {mem_desc.rank}) but got {dim}")
+        _check(
+            mem_desc.shape == mem_desc.type.alloc_shape[-mem_desc.rank:],
+            lambda: "cta_slice does not support slicing an existing subview",
+        )
+        layout = mem_desc.layout
+        _check(
+            isinstance(layout, ttgl.PaddedSharedLayout),
+            lambda: f"cta_slice currently requires PaddedSharedLayout but got {type(layout)}",
+        )
+
+        src_shape_per_cta = ttgl._get_shape_per_cta(mem_desc.shape, layout.cga_layout)
+        split = mem_desc.shape[dim] // src_shape_per_cta[dim]
+        _check(split > 1, lambda: f"cta_slice dimension {dim} is not split across CTAs")
+        _check(start % split == 0, lambda: f"cta_slice start {start} must be divisible by CTA split {split}")
+        _check(length % split == 0, lambda: f"cta_slice length {length} must be divisible by CTA split {split}")
+
+        local_start = start // split
+        local_length = length // split
+        _check(
+            local_start + local_length <= src_shape_per_cta[dim],
+            lambda: (f"CTA-local slice [{local_start}, {local_start + local_length}) exceeds "
+                     f"the per-CTA extent {src_shape_per_cta[dim]}"),
+        )
+
+        shape = list(mem_desc.shape)
+        shape[dim] = length
+        shape_per_cta = ttgl._get_shape_per_cta(shape, layout.cga_layout)
+
+        # CTA-local slices use a resized physical layout: block bases retain
+        # CTA ownership while offset bases cover only the sliced per-CTA tile.
+        # PaddedSharedLayout.with_identity_for produces identity offset bases,
+        # so reject custom/swizzled offset bases until they can be resized
+        # without losing their layout semantics.
+        kept_bases = []
+        for basis in layout.offset_bases:
+            nonzero = [i for i, value in enumerate(basis) if value]
+            _check(
+                len(nonzero) == 1 and basis[nonzero[0]] & (basis[nonzero[0]] - 1) == 0,
+                lambda: "cta_slice currently requires identity PaddedSharedLayout offset bases",
+            )
+            basis_dim = nonzero[0]
+            if basis[basis_dim] < shape_per_cta[basis_dim]:
+                kept_bases.append(basis)
+
+        resized_layout = ttgl.PaddedSharedLayout(
+            layout.interval_padding_pairs,
+            kept_bases,
+            layout.cga_layout,
+            shape,
+        )
+        alloc_shape = list(mem_desc.type.alloc_shape[:-mem_desc.rank]) + shape
+        ty = ttgl.shared_memory_descriptor_type(mem_desc.dtype, shape, resized_layout, alloc_shape)
+        offsets = [0] * mem_desc.rank
+        offsets[dim] = local_start
+        builder = self.builder
+        handle = builder.create_memdesc_cta_subslice(ty.to_ir(builder), mem_desc.handle, offsets)
+        return ttgl.shared_memory_descriptor(handle, **ty.__dict__)
+
     def memdesc_index(self, mem_desc, index):
         index = self.to_tensor(index)
         _check(index.type == ttgl.int32, lambda: f"expected 'index' to be int32 but got {index.type}")

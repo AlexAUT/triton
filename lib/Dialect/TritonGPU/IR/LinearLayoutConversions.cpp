@@ -1590,8 +1590,39 @@ LinearLayout chooseScaledWmmaScaleLayout(
   ctaLayout = actionRemoveBroadcastedRegs(ctaLayout).apply(ctaLayout);
 
   ctaLayout = tileLayout.transposeOuts(outDimNames) * ctaLayout;
+  auto scaleCgaLayout = cgaLayout;
+  if (cgaLayout.getLinearLayout().getTotalInDimSize() > 1) {
+    auto cgaLL = cgaLayout.getLinearLayout();
+    auto dimNonK = outDimNames[rank - 2];
+    auto dimScaleK = outDimNames[rank - 1];
+    if (dotOperandIdx == 0) {
+      // A scales are laid out as [M, K-scale] (or [B, M, K-scale]).
+      // Preserve CGA bases for batch/M and broadcast any N split.
+      scaleCgaLayout =
+          CGAEncodingAttr::get(ctx, cgaLL.resizeOutDim(dimScaleK, 1));
+    } else {
+      // B scales are laid out as [N, K-scale] (or [B, N, K-scale]),
+      // while the parent WMMA CGA layout is over [M, N] (or [B, M, N]).
+      // Move the N component to the scale non-K dimension and broadcast M.
+      auto cgaBases = cgaLL.getBases();
+      auto kBlock = StringAttr::get(ctx, "block");
+      auto &blockBases = cgaBases[kBlock];
+      auto cgaDims = cgaLL.getOutDims();
+      unsigned nonKDimIdx = rank - 2;
+      unsigned scaleKDimIdx = rank - 1;
+      for (auto &basis : blockBases) {
+        basis[nonKDimIdx] = basis[scaleKDimIdx];
+        basis[scaleKDimIdx] = 0;
+      }
+      cgaDims[nonKDimIdx].second = cgaLL.getOutDimSize(dimScaleK);
+      cgaDims[scaleKDimIdx].second = 1;
+      scaleCgaLayout =
+          CGAEncodingAttr::get(ctx, LinearLayout(std::move(cgaBases), cgaDims,
+                                                 /*requireSurjective=*/true));
+    }
+  }
   auto nonOpSelLayout =
-      combineCtaCgaWithShape(ctaLayout, cgaLayout, dotOperandShape);
+      combineCtaCgaWithShape(ctaLayout, scaleCgaLayout, dotOperandShape);
 
   if (wmmaMDim > 16)
     return nonOpSelLayout;

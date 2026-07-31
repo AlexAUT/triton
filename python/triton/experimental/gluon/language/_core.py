@@ -461,6 +461,27 @@ class shared_memory_descriptor(base_value):
         dim = _unwrap_if_constexpr(dim)
         return _semantic.memdesc_slice(self, start, length, dim)
 
+    def cta_slice(self, start, length, dim=0, _semantic: GluonSemantic = None) -> shared_memory_descriptor:
+        """
+        Slice the CTA-local portion of a distributed shared-memory descriptor.
+
+        ``start`` and ``length`` are expressed in collective tensor coordinates.
+        Each CTA applies the corresponding per-CTA offset to its own shared
+        allocation, preserving CTA ownership and avoiding cross-CTA LDS reads.
+
+        Args:
+            start (int): The collective starting index of the slice.
+            length (int): The collective length of the slice.
+            dim (int): The CTA-split dimension to slice (default: 0).
+
+        Returns:
+            shared_memory_descriptor: Descriptor for the CTA-local subview.
+        """
+        start = _unwrap_if_constexpr(start)
+        length = _unwrap_if_constexpr(length)
+        dim = _unwrap_if_constexpr(dim)
+        return _semantic.memdesc_cta_slice(self, start, length, dim)
+
     @builtin
     def index(self, index, _semantic: GluonSemantic = None) -> shared_memory_descriptor:
         """

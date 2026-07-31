@@ -457,7 +457,8 @@ static std::optional<int> dotCanBeProperlyAsync(ttng::WarpGroupDotOp dotOp,
     while (!forOp.isDefinedOutsideOfLoop(transitiveOperand)) {
       if (auto *definingOp = transitiveOperand.getDefiningOp()) {
         if (isa<ttg::ConvertLayoutOp, ttg::MemDescTransOp,
-                ttg::MemDescReshapeOp, ttg::MemDescSubsliceOp>(definingOp)) {
+                ttg::MemDescReshapeOp, ttg::MemDescSubsliceOp,
+                ttg::MemDescCTASubsliceOp>(definingOp)) {
           transitiveOperand = definingOp->getOperand(0);
           continue;
         }

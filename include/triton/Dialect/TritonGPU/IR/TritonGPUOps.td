@@ -270,6 +270,26 @@ def TTG_MemDescSubsliceOp : TTG_Op<"memdesc_subslice", [Pure, MemDescViewTrait]>
   let hasVerifier = 1;
 }
 
+def TTG_MemDescCTASubsliceOp : TTG_Op<"memdesc_cta_subslice", [Pure, MemDescViewTrait]> {
+  let summary = "take the same CTA-local subview in every CTA";
+
+  let description = [{
+    This operation returns a view of the same sub-tile in every CTA's local
+    shared-memory allocation. Offsets are expressed in per-CTA coordinates,
+    and the result encoding is resized to the result's per-CTA shape while
+    preserving its CGA layout. It therefore cannot induce cross-CTA shared
+    memory accesses.
+  }];
+
+  let arguments = (ins TTG_MemDescType:$src, DenseI32ArrayAttr:$offsets);
+  let results = (outs TTG_MemDescType:$result);
+  let assemblyFormat = [{
+    $src `[` custom<Offsets>($offsets) `]` attr-dict `:` qualified(type($src))
+    `->` qualified(type($result))
+  }];
+  let hasVerifier = 1;
+}
+
 def TTG_MemDescTransOp : TTG_Op<"memdesc_trans", [Pure,
                                                   MemDescViewTrait,
                                                   TransposeOpInterface,

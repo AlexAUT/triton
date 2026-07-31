@@ -1276,6 +1276,79 @@ LogicalResult MemDescSubsliceOp::verify() {
   return success();
 }
 
+LogicalResult MemDescCTASubsliceOp::verify() {
+  auto srcTy = getSrc().getType();
+  auto dstTy = getType();
+  if (srcTy.getElementType() != dstTy.getElementType())
+    return emitError("result element type must match desc element type");
+  if (srcTy.getRank() != dstTy.getRank())
+    return emitError("result rank must equal input rank");
+  if (getOffsets().size() != srcTy.getRank())
+    return emitError("offsets must have the same rank as input");
+
+  auto srcPadded = dyn_cast<PaddedSharedEncodingAttr>(srcTy.getEncoding());
+  auto dstPadded = dyn_cast<PaddedSharedEncodingAttr>(dstTy.getEncoding());
+  if (!srcPadded || !dstPadded)
+    return emitError(
+        "CTA-local subslice currently requires padded shared encodings");
+  if (srcPadded.getIntervals() != dstPadded.getIntervals() ||
+      srcPadded.getPaddings() != dstPadded.getPaddings())
+    return emitError(
+        "CTA-local subslice must preserve the shared padding scheme");
+  if (srcPadded.getCGALayout() != dstPadded.getCGALayout())
+    return emitError("CTA-local subslice must preserve the CGA layout");
+  if (srcTy.getAllocShape().take_back(srcTy.getRank()) != srcTy.getShape())
+    return emitError(
+        "CTA-local subslice does not support slicing an existing subview");
+  if (dstTy.getAllocShape().take_back(dstTy.getRank()) != dstTy.getShape())
+    return emitError(
+        "CTA-local subslice result alloc shape must match its shape");
+
+  SetVector<int> splitDims;
+  for (int dim = 0; dim < srcTy.getRank(); ++dim) {
+    if (srcTy.getDimSize(dim) != dstTy.getDimSize(dim))
+      splitDims.insert(dim);
+  }
+  if (splitDims.size() != 1)
+    return emitError("CTA-local subslice must slice exactly one dimension");
+
+  auto srcShapePerCTA = getShapePerCTA(srcTy.getEncoding(), srcTy.getShape());
+  auto dstShapePerCTA = getShapePerCTA(dstTy.getEncoding(), dstTy.getShape());
+  int splitDim = splitDims.front();
+  if (srcTy.getDimSize(splitDim) == srcShapePerCTA[splitDim])
+    return emitError("CTA-local subslice dimension must be split across CTAs");
+
+  for (auto [dim, offset] : llvm::enumerate(getOffsets())) {
+    if (dim != splitDim) {
+      if (offset != 0)
+        return emitError(
+            "CTA-local subslice offset must be zero on unsliced dimensions");
+      continue;
+    }
+    if (dstShapePerCTA[dim] >= srcShapePerCTA[dim])
+      return emitError("CTA-local subslice must reduce the per-CTA dimension");
+    if (offset & (dstShapePerCTA[dim] - 1))
+      return emitError(
+          "CTA-local subslice offset may not touch the per-CTA tile");
+    if (offset + dstShapePerCTA[dim] > srcShapePerCTA[dim])
+      return emitError(
+          "CTA-local subslice may not exceed the per-CTA source shape");
+  }
+
+  auto kOffset = StringAttr::get(getContext(), "offset");
+  auto srcOffsetBases = srcPadded.getLinearComponent().getBases().at(kOffset);
+  auto dstOffsetBases = dstPadded.getLinearComponent().getBases().at(kOffset);
+  if (!llvm::all_of(dstOffsetBases, [&](ArrayRef<int32_t> basis) {
+        return llvm::any_of(srcOffsetBases, [&](const auto &srcBasis) {
+          return ArrayRef<int32_t>(srcBasis) == basis;
+        });
+      }))
+    return emitError(
+        "CTA-local subslice result offset layout must be a subset of the "
+        "source offset layout");
+  return success();
+}
+
 // -- WarpSpecializeOp --
 
 RegionRange WarpSpecializeOp::getPartitionRegions() {
