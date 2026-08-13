@@ -467,6 +467,8 @@ class HIPBackend(BaseBackend):
         # llvm -> hsaco
         flags = []
         features = '-real-true16' if 'gfx11' in options.arch else ''
+        if options.arch in ["gfx942", "gfx950"]:
+            flags.append("amdgpu-use-amdgpu-trackers")
         ir_hash = hashlib.sha256(src.encode("utf-8")).hexdigest()
         dump_file_id = names[0] + '_' + ir_hash
         _ = llvm.translate_to_mir(src, amd.TARGET_TRIPLE, options.arch, features, flags, options.enable_fp_fusion,
