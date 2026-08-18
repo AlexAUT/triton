@@ -254,12 +254,13 @@ def _validate_sha256(archive_path, url, expected_sha256):
     raise RuntimeError(message)
 
 
-def _download_and_extract(url, download_dir, label, archives_path, expected_sha256=None):
+def _download_and_extract(url, download_dir, label, archives_path, expected_sha256=None, keep_old=False):
     archive_path = _get_archive_path(archives_path, url)
     _download_file(url, archive_path, f"downloading {label}")
     _validate_sha256(archive_path, url, expected_sha256)
-    with contextlib.suppress(Exception):
-        shutil.rmtree(download_dir)
+    if not keep_old:
+        with contextlib.suppress(Exception):
+            shutil.rmtree(download_dir)
     os.makedirs(download_dir, exist_ok=True)
     _extract_archive(archive_path, download_dir)
     os.remove(archive_path)
@@ -393,7 +394,11 @@ def _get_thirdparty_package_cmake_vars(package: Package, helper_args: BuildHelpe
     if helper_args.offline_build and not input_defined:
         raise RuntimeError(f"Requested an offline build but {package.syspath_var_name} is not set")
     if not helper_args.offline_build and not input_defined and not input_compatible:
-        _download_and_extract(package.url, package_root_dir, package.name, helper_args.archives_path, package.sha256sum)
+        keep_old = package.package == "llvm" and check_env_flag("TRITON_KEEP_LLVM_CACHE")
+        if keep_old and os.path.exists(package_dir):
+            shutil.rmtree(package_dir)
+        _download_and_extract(package.url, package_root_dir, package.name, helper_args.archives_path, package.sha256sum,
+                              keep_old)
         # write version url to package_dir
         with open(os.path.join(package_dir, "version.txt"), "w") as file:
             file.write(package.url)
