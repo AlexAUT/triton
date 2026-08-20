@@ -97,8 +97,17 @@ struct ScaledUpcastFp4OpPattern
 
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     if (targetInfo.supportsCvtPkScalePk8()) {
-      auto groupScaleReg =
-          computeFp4GroupScaleRegisters(upcastOp, inputVals.size());
+      // Some layouts can pack scales into byte pairs selected by scale_sel.
+      // A pair either contains two consecutive scales, or duplicates one scale
+      // for both wave halves. This avoids shuffling scales across lanes.
+      auto opSelPlan = amdgpu::computeFp4Pk8ScaleOpSel(upcastOp);
+      SmallVector<int> groupScaleReg;
+      if (!opSelPlan)
+        groupScaleReg =
+            computeFp4GroupScaleRegisters(upcastOp, inputVals.size());
+      else
+        assert(opSelPlan->size() == inputVals.size() / 4 &&
+               "expected one scale selector per pk8 group");
 
       // FP4/FP6 v_cvt_scale_pk8 with opSel=0 sources the scale for output
       // lanes 16..31 from byte 1 of the *lower* 16 lanes' Vscale while output
@@ -123,18 +132,55 @@ struct ScaledUpcastFp4OpPattern
         return crossScaleVals[scaleIdx];
       };
 
+      SmallVector<Value> packedScaleVals(scaleVals.size() / 4);
+      SmallVector<Value> duplicatedScaleVals(scaleVals.size() / 2);
+      auto getPackedScale =
+          [&](const amdgpu::Fp4Pk8ScaleOpSel &opSel) -> Value {
+        int scaleBase = opSel.scaleBase;
+        if (opSel.duplicateScalePairs) {
+          assert(scaleBase % 2 == 0 && scaleBase + 1 < scaleVals.size());
+          int packedIdx = scaleBase / 2;
+          if (!duplicatedScaleVals[packedIdx]) {
+            Value packedScale = b.undef(vec_ty(i8_ty, 4));
+            for (int byte = 0; byte < 4; ++byte)
+              packedScale =
+                  b.insert_element(packedScale, scaleVals[scaleBase + byte / 2],
+                                   b.i32_val(byte));
+            duplicatedScaleVals[packedIdx] = b.bitcast(packedScale, i32_ty);
+          }
+          return duplicatedScaleVals[packedIdx];
+        }
+
+        assert(scaleBase % 4 == 0 && scaleBase + 3 < scaleVals.size());
+        int packedIdx = scaleBase / 4;
+        if (!packedScaleVals[packedIdx]) {
+          Value packedScale = b.undef(vec_ty(i8_ty, 4));
+          for (int byte = 0; byte < 4; ++byte)
+            packedScale = b.insert_element(
+                packedScale, scaleVals[scaleBase + byte], b.i32_val(byte));
+          packedScaleVals[packedIdx] = b.bitcast(packedScale, i32_ty);
+        }
+        return packedScaleVals[packedIdx];
+      };
+
       for (int i = 0; i < inputVals.size(); i += 4) {
-        int scaleIdx = groupScaleReg[i / 4];
-        Value crossScale = getCrossScale(scaleIdx);
+        int group = i / 4;
+        int scaleIdx = opSelPlan ? 0 : groupScaleReg[group];
+        Value crossScale = opSelPlan ? Value() : getCrossScale(scaleIdx);
+        Value packedScale =
+            opSelPlan ? getPackedScale((*opSelPlan)[group]) : Value();
+        std::optional<unsigned> scaleSel =
+            opSelPlan ? std::optional<unsigned>((*opSelPlan)[group].scaleSel)
+                      : std::nullopt;
 
         const auto &converted =
             elemType.isF16()
                 ? upcast8xMxfp8fp4_HW<ROCDL::CvtPkScalePk8F16Fp4Op>(
                       rewriter, loc, inputVals, i, scaleVals, scaleIdx,
-                      crossScale)
+                      crossScale, packedScale, scaleSel)
                 : upcast8xMxfp8fp4_HW<ROCDL::CvtPkScalePk8Bf16Fp4Op>(
                       rewriter, loc, inputVals, i, scaleVals, scaleIdx,
-                      crossScale);
+                      crossScale, packedScale, scaleSel);
 
         results.append(converted.begin(), converted.end());
       }

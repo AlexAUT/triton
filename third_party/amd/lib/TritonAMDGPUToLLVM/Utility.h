@@ -11,6 +11,7 @@
 #include "triton/Conversion/MLIRTypes.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include <cstdint>
+#include <optional>
 
 namespace mlir::LLVM::AMD {
 
@@ -242,12 +243,16 @@ upcast4xMxfp8_HW(RewriterBase &rewriter, Location loc, ArrayRef<Value> xVals,
 // crossLaneScale (when present) is packed into byte 1. For F8, opSel=0 uses
 // byte 0 for both lane halves when the scale layout is lane^16-broadcast;
 // otherwise opSel=8 selects Block16 mode and byte 1 supplies the lane^16 scale.
+// FP4 layouts that expose all four Vscale bytes can instead provide an already
+// packed i32 and a layout-derived scaleSelOverride.
 //
 template <typename ConvertOp>
-SmallVector<Value, 8> upcast8xMxfp8fp4_HW(RewriterBase &rewriter, Location loc,
-                                          ArrayRef<Value> inputVals, int idx,
-                                          ArrayRef<Value> scales, int scaleIdx,
-                                          Value crossLaneScale = Value()) {
+SmallVector<Value, 8>
+upcast8xMxfp8fp4_HW(RewriterBase &rewriter, Location loc,
+                    ArrayRef<Value> inputVals, int idx, ArrayRef<Value> scales,
+                    int scaleIdx, Value crossLaneScale = Value(),
+                    Value packedScaleOverride = Value(),
+                    std::optional<unsigned> scaleSelOverride = std::nullopt) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
   bool toFp16 = (std::is_same_v<ConvertOp, ROCDL::CvtPkScalePk8F16Fp8Op> ||
@@ -267,15 +272,24 @@ SmallVector<Value, 8> upcast8xMxfp8fp4_HW(RewriterBase &rewriter, Location loc,
       fromFP4 ? b.bitcast(packedVec, i32_ty)
               : b.bitcast(packedVec, vec_ty(i32_ty, packedSize / sizeof(int)));
 
-  assert(scaleIdx >= 0 && scaleIdx < static_cast<int>(scales.size()));
-  Value localScale = scales[scaleIdx];
-  Value partnerScale = crossLaneScale ? crossLaneScale : localScale;
-  unsigned scaleSel = !fromFP4 && crossLaneScale ? 8 : 0;
-  Value packedScale = b.undef(vec_ty(i8_ty, 4));
-  packedScale = b.insert_element(packedScale, localScale, b.i32_val(0));
-  if (fromFP4 || crossLaneScale)
-    packedScale = b.insert_element(packedScale, partnerScale, b.i32_val(1));
-  Value scaleInt32 = b.bitcast(packedScale, i32_ty);
+  Value scaleInt32;
+  unsigned scaleSel;
+  if (packedScaleOverride) {
+    assert(fromFP4 && scaleSelOverride &&
+           "scale override is only supported for FP4");
+    scaleInt32 = packedScaleOverride;
+    scaleSel = *scaleSelOverride;
+  } else {
+    assert(scaleIdx >= 0 && scaleIdx < static_cast<int>(scales.size()));
+    Value localScale = scales[scaleIdx];
+    Value partnerScale = crossLaneScale ? crossLaneScale : localScale;
+    scaleSel = !fromFP4 && crossLaneScale ? 8 : 0;
+    Value packedScale = b.undef(vec_ty(i8_ty, 4));
+    packedScale = b.insert_element(packedScale, localScale, b.i32_val(0));
+    if (fromFP4 || crossLaneScale)
+      packedScale = b.insert_element(packedScale, partnerScale, b.i32_val(1));
+    scaleInt32 = b.bitcast(packedScale, i32_ty);
+  }
   auto res =
       ConvertOp::create(rewriter, loc, resType, packedVec, scaleInt32, scaleSel)
           .getRes();

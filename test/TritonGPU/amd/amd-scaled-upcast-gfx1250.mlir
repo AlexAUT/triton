@@ -98,3 +98,54 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
     tt.return
   }
 }
+
+// -----
+
+#packed = #ttg.linear<{register = [[0, 1], [0, 2], [0, 4], [0, 8], [0, 32], [0, 64], [0, 128], [64, 0]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [0, 16]], warp = [[16, 0], [32, 0]], block = []}>
+#scale = #ttg.linear<{register = [[0, 1], [0, 2], [0, 8], [64, 0]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [0, 4]], warp = [[16, 0], [32, 0]], block = []}>
+#unpacked = #ttg.linear<{register = [[0, 1], [0, 2], [0, 4], [0, 8], [0, 16], [0, 64], [0, 128], [0, 256], [64, 0]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [0, 32]], warp = [[16, 0], [32, 0]], block = []}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: llvm.func @cvt_scale_pk8_bf16_fp4_all_scale_sel
+  tt.func public @cvt_scale_pk8_bf16_fp4_all_scale_sel(%output: tensor<128x512x!tt.ptr<bf16>, #unpacked>, %x: tensor<128x256xi8, #packed>, %scale: tensor<128x16xi8, #scale>) {
+    // The first 16 pk8 groups cover K=0..255 and use all four scale
+    // selectors. No cross-lane shuffle is needed: scale_sel selects the
+    // appropriate lane half and byte pair from the packed scale register.
+    // CHECK-NOT: rocdl.permlanex16
+    // CHECK-COUNT-4: rocdl.cvt.scale.pk8.bf16.fp4 {{.*}}[0] : vector<8xbf16>
+    // CHECK-COUNT-4: rocdl.cvt.scale.pk8.bf16.fp4 {{.*}}[2] : vector<8xbf16>
+    // CHECK-COUNT-4: rocdl.cvt.scale.pk8.bf16.fp4 {{.*}}[1] : vector<8xbf16>
+    // CHECK-COUNT-4: rocdl.cvt.scale.pk8.bf16.fp4 {{.*}}[3] : vector<8xbf16>
+    %up = amdg.scaled_upcast_fp4 %x scale %scale {axis = 1 : i32} : tensor<128x256xi8, #packed>, tensor<128x16xi8, #scale> -> tensor<128x512xbf16, #unpacked>
+    tt.store %output, %up : tensor<128x512x!tt.ptr<bf16>, #unpacked>
+    tt.return
+  }
+}
+
+// -----
+
+#packed = #ttg.linear<{register = [[0, 1], [0, 2], [0, 8], [0, 16], [0, 32], [0, 64], [0, 128], [64, 0]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [0, 4]], warp = [[16, 0], [32, 0]], block = []}>
+#scale = #ttg.linear<{register = [[0, 1], [0, 2], [0, 8], [64, 0]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [0, 4]], warp = [[16, 0], [32, 0]], block = []}>
+#unpacked = #ttg.linear<{register = [[0, 1], [0, 2], [0, 4], [0, 16], [0, 32], [0, 64], [0, 128], [0, 256], [64, 0]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [0, 8]], warp = [[16, 0], [32, 0]], block = []}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: llvm.func @cvt_scale_pk8_bf16_fp4_duplicate_scale_pairs
+  tt.func public @cvt_scale_pk8_bf16_fp4_duplicate_scale_pairs(%output: tensor<128x512x!tt.ptr<bf16>, #unpacked>, %x: tensor<128x256xi8, #packed>, %scale: tensor<128x16xi8, #scale>) {
+    // Both wave halves need the same scale. Duplicate each scale into a byte
+    // pair so scale_sel can select it without a cross-lane exchange.
+    // CHECK: %[[S0:.+]] = llvm.extractvalue %arg2[0] : !llvm.struct
+    // CHECK: %[[S1:.+]] = llvm.extractvalue %arg2[1] : !llvm.struct
+    // CHECK: %[[P0:.+]] = llvm.insertelement %[[S0]], %{{.+}}[%{{.+}} : i32] : vector<4xi8>
+    // CHECK: %[[P1:.+]] = llvm.insertelement %[[S0]], %[[P0]][%{{.+}} : i32] : vector<4xi8>
+    // CHECK: %[[P2:.+]] = llvm.insertelement %[[S1]], %[[P1]][%{{.+}} : i32] : vector<4xi8>
+    // CHECK: llvm.insertelement %[[S1]], %[[P2]][%{{.+}} : i32] : vector<4xi8>
+    // CHECK-NOT: rocdl.permlanex16
+    // CHECK-COUNT-2: rocdl.cvt.scale.pk8.bf16.fp4 {{.*}}[0] : vector<8xbf16>
+    // CHECK-COUNT-2: rocdl.cvt.scale.pk8.bf16.fp4 {{.*}}[2] : vector<8xbf16>
+    // CHECK-COUNT-2: rocdl.cvt.scale.pk8.bf16.fp4 {{.*}}[0] : vector<8xbf16>
+    // CHECK-COUNT-2: rocdl.cvt.scale.pk8.bf16.fp4 {{.*}}[2] : vector<8xbf16>
+    // CHECK-COUNT-2: rocdl.cvt.scale.pk8.bf16.fp4 {{.*}}[1] : vector<8xbf16>
+    // CHECK-COUNT-2: rocdl.cvt.scale.pk8.bf16.fp4 {{.*}}[3] : vector<8xbf16>
+    %up = amdg.scaled_upcast_fp4 %x scale %scale {axis = 1 : i32} : tensor<128x256xi8, #packed>, tensor<128x16xi8, #scale> -> tensor<128x512xbf16, #unpacked>
+    tt.store %output, %up : tensor<128x512x!tt.ptr<bf16>, #unpacked>
+    tt.return
+  }
+}

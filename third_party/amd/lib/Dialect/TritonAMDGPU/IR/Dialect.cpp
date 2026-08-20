@@ -34,6 +34,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/FormatVariadic.h"
+#include <array>
 #include <limits>
 #include <optional>
 
@@ -262,13 +263,109 @@ LogicalResult verifyScaledUpcastFp4ScaleLayout(ScaledUpcastFp4Op op) {
     return op.emitError() << "could not infer expected scale encoding";
   }
 
-  if (stripped(scaleEnc) != *expectedLL)
+  if (stripped(scaleEnc) != *expectedLL &&
+      !computeFp4Pk8ScaleOpSel(op).has_value())
     return op.emitError()
            << "scale encoding is not compatible with the inferred scale layout";
   return success();
 }
 
 } // namespace
+
+std::optional<SmallVector<Fp4Pk8ScaleOpSel>>
+computeFp4Pk8ScaleOpSel(ScaledUpcastFp4Op op) {
+  auto scaleBlock = scaledUpcastFp4ScaleBlock(op);
+  if (!scaleBlock || *scaleBlock != 32)
+    return std::nullopt;
+
+  MLIRContext *ctx = op.getContext();
+  auto outputTy = op.getOutput().getType();
+  auto scaleTy = op.getScale().getType();
+  LinearLayout outputLL = gpu::toLinearLayout(outputTy);
+  LinearLayout scaleLL = gpu::toLinearLayout(scaleTy);
+  auto outputToScale = ScaledUpcastFp4Op::computeScaleLayout(
+      outputLL, op.getAxis(), *scaleBlock);
+  if (!outputToScale)
+    return std::nullopt;
+
+  auto kRegister = StringAttr::get(ctx, "register");
+  auto kLane = StringAttr::get(ctx, "lane");
+  auto kWarp = StringAttr::get(ctx, "warp");
+  auto kBlock = StringAttr::get(ctx, "block");
+  if (outputLL.getInDimSize(kLane) != 32 || scaleLL.getInDimSize(kLane) != 32 ||
+      outputLL.getInDimSize(kWarp) != scaleLL.getInDimSize(kWarp) ||
+      outputLL.getInDimSize(kBlock) != scaleLL.getInDimSize(kBlock) ||
+      outputLL.getInDimSize(kRegister) % 8 != 0)
+    return std::nullopt;
+
+  LinearLayout outputToScaleInput = outputToScale->invertAndCompose(scaleLL);
+  auto getInput = [](const auto &coord,
+                     StringAttr dim) -> std::optional<int32_t> {
+    auto it = llvm::find_if(
+        coord, [&](const auto &dimValue) { return dimValue.first == dim; });
+    if (it == coord.end())
+      return std::nullopt;
+    return it->second;
+  };
+  auto mapOutputInput =
+      [&](int reg, int lane, int warp,
+          int block) -> std::optional<std::array<int32_t, 4>> {
+    auto coord = outputToScaleInput.apply(
+        {{kRegister, reg}, {kLane, lane}, {kWarp, warp}, {kBlock, block}});
+    auto scaleReg = getInput(coord, kRegister);
+    auto scaleLane = getInput(coord, kLane);
+    auto scaleWarp = getInput(coord, kWarp);
+    auto scaleBlock = getInput(coord, kBlock);
+    if (!scaleReg || !scaleLane || !scaleWarp || !scaleBlock)
+      return std::nullopt;
+    return std::array<int32_t, 4>{*scaleReg, *scaleLane, *scaleWarp,
+                                  *scaleBlock};
+  };
+
+  int numGroups = outputLL.getInDimSize(kRegister) / 8;
+  SmallVector<Fp4Pk8ScaleOpSel> plan;
+  plan.reserve(numGroups);
+  for (int group = 0; group < numGroups; ++group) {
+    auto first = mapOutputInput(8 * group, 0, 0, 0);
+    if (!first)
+      return std::nullopt;
+    int scaleReg = (*first)[0];
+    int sourceLane = (*first)[1];
+    if (sourceLane != 0 && sourceLane != 16)
+      return std::nullopt;
+    int sourceLaneHalf = sourceLane / 16;
+    int normalBase = scaleReg & ~3;
+    int duplicateBase = scaleReg & ~1;
+    bool normalPair =
+        (scaleReg & 1) == 0 && normalBase + 3 < scaleLL.getInDimSize(kRegister);
+    bool duplicatePair = duplicateBase + 1 < scaleLL.getInDimSize(kRegister);
+
+    for (int block = 0; block < outputLL.getInDimSize(kBlock); ++block) {
+      for (int warp = 0; warp < outputLL.getInDimSize(kWarp); ++warp) {
+        for (int lane = 0; lane < 32; ++lane) {
+          auto mapped = mapOutputInput(8 * group, lane, warp, block);
+          if (!mapped)
+            return std::nullopt;
+          int expectedLane = (lane % 16) + sourceLaneHalf * 16;
+          bool commonMatch = (*mapped)[1] == expectedLane &&
+                             (*mapped)[2] == warp && (*mapped)[3] == block;
+          normalPair &= commonMatch &&
+                        (*mapped)[0] == normalBase + (scaleReg & 2) + lane / 16;
+          duplicatePair &= commonMatch && (*mapped)[0] == scaleReg;
+        }
+      }
+    }
+    if (normalPair) {
+      plan.push_back({normalBase, sourceLaneHalf | (scaleReg & 2), false});
+    } else if (duplicatePair) {
+      plan.push_back(
+          {duplicateBase, sourceLaneHalf | 2 * (scaleReg & 1), true});
+    } else {
+      return std::nullopt;
+    }
+  }
+  return plan;
+}
 
 // Derive the layout of a scale tensor from the upcast output layout. A compact
 // scale holds a single value per `elementsPerScale` consecutive output elements

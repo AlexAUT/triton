@@ -32,6 +32,8 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Traits.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "llvm/ADT/SmallVector.h"
+#include <optional>
 
 namespace mlir::triton::amd {
 struct L2Cache : public SideEffects::Resource::Base<L2Cache> {
@@ -60,5 +62,21 @@ inline int getTensorDescNumDwords(triton::TensorDescType type) {
 #include "amd/include/Dialect/TritonAMDGPU/IR/TritonAMDGPUOpInterfaces.h.inc"
 #define GET_OP_CLASSES
 #include "amd/include/Dialect/TritonAMDGPU/IR/Ops.h.inc"
+
+namespace mlir::triton::amdgpu {
+
+struct Fp4Pk8ScaleOpSel {
+  int32_t scaleBase;
+  int32_t scaleSel;
+  bool duplicateScalePairs;
+};
+
+/// Return the scale-register packing and scale_sel value for each packed FP4
+/// conversion group when the scale layout can be consumed directly by
+/// v_cvt_scale_pk8's four scale selectors.
+std::optional<SmallVector<Fp4Pk8ScaleOpSel>>
+computeFp4Pk8ScaleOpSel(ScaledUpcastFp4Op op);
+
+} // namespace mlir::triton::amdgpu
 
 #endif // TRITON_THIRD_PARTY_AMD_INCLUDE_DIALECT_TRITONAMDGPU_IR_DIALECT_H_
