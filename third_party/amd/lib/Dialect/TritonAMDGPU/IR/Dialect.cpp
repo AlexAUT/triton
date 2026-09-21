@@ -387,6 +387,19 @@ LogicalResult verifyScaledDowncastScaleShapeAndAxis(OpT op,
   return success();
 }
 
+template <typename OpT>
+LogicalResult verifyScaledDowncastScaleFormat(OpT op,
+                                              RankedTensorType scaleTy) {
+  auto expected = scaleTy.getElementType().isF32()
+                      ? ScaledDowncastScaleFormat::E8M0_F32
+                      : ScaledDowncastScaleFormat::E8M0;
+  if (op.getScaleFormat() != expected)
+    return op.emitError()
+           << "scale_format does not match the scale element type; expected "
+           << stringifyScaledDowncastScaleFormat(expected);
+  return success();
+}
+
 } // namespace
 
 FailureOr<LinearLayout>
@@ -810,6 +823,8 @@ LogicalResult ScaledDowncastFp4Op::verify() {
   RankedTensorType inputTy = getInput().getType();
   RankedTensorType outputTy = getOutput().getType();
   RankedTensorType scaleTy = getScale().getType();
+  if (failed(verifyScaledDowncastScaleFormat(*this, scaleTy)))
+    return failure();
   if (failed(verifyScaledDowncastScaleShapeAndAxis(*this, outputTy, scaleTy)))
     return failure();
 
@@ -891,6 +906,8 @@ LogicalResult ScaledDowncastFp8Op::verify() {
     return emitError() << "input and output must have the same shape";
   if (inputTy.getEncoding() != outputTy.getEncoding())
     return emitError() << "input and output must have the same encoding";
+  if (failed(verifyScaledDowncastScaleFormat(*this, scaleTy)))
+    return failure();
   if (failed(verifyScaledDowncastScaleShapeAndAxis(*this, outputTy, scaleTy)))
     return failure();
 
