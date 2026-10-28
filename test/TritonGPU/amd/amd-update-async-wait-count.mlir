@@ -1,4 +1,5 @@
 // RUN: triton-opt %s -split-input-file --tritonamdgpu-update-async-wait-count=gfx-arch=gfx1250 | FileCheck %s
+// RUN: triton-opt %s -split-input-file --tritonamdgpu-update-async-wait-count=gfx-arch=gfx1250 -verify-diagnostics >/dev/null
 
 // Simple case without any branching
 
@@ -511,20 +512,36 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 #smem = #ttg.shared_memory
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
   // CHECK-LABEL: mix_global_to_local_and_local_to_global
-  tt.func public @mix_global_to_local_and_local_to_global(%arg1: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>, %arg2: tensor<32x32x!tt.ptr<f32>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>}) {
+  tt.func public @mix_global_to_local_and_local_to_global(
+      %storeSrc: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>,
+      %storeDst: tensor<32x32x!tt.ptr<f32>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>},
+      %arg1: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>, %arg2: tensor<32x32x!tt.ptr<f32>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>}) {
     // Emits 2 async load instructions
     %0 = ttg.async_copy_global_to_local %arg2, %arg1 : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
     %1 = ttg.async_commit_group tokens %0
     // Emits 2 async store instructions
-    %2 = amdg.async_copy_local_to_global %arg1, %arg2 : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    %2 = amdg.async_copy_local_to_global %storeSrc, %storeDst : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
     %3 = ttg.async_commit_group tokens %2
 
-    // Wait on token %1: 2 store instructions outstanding
-    // CHECK: amdg.async_wait {{.*}} {num_inst = 2
+    // The counted interval only contains stores, but the awaited group is a
+    // load. Out-of-order completion requires waiting for all instructions.
+    // CHECK: amdg.async_wait {{.*}} {num_inst = 0
+    // expected-remark @+1 {{waiting on a mix of async loads and stores}}
     %9 = ttg.async_wait %1 {num = 0 : i32}
     // Wait on token %3: 0 outstanding
     // CHECK: amdg.async_wait {{.*}} {num_inst = 0
     %10 = ttg.async_wait %3 {num = 0 : i32}
+    // Token-based waits remain conservative in a mixed module even after a
+    // full wait separates the transfer directions.
+    %11 = amdg.async_copy_local_to_global %storeSrc, %storeDst : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    %12 = ttg.async_commit_group tokens %11
+    %13 = amdg.async_copy_local_to_global %storeSrc, %storeDst : !ttg.memdesc<32x32xf32, #shared, #smem, mutable> -> tensor<32x32x!tt.ptr<f32>, #blocked>
+    %14 = ttg.async_commit_group tokens %13
+    // CHECK: amdg.async_wait {{.*}} {num_inst = 0
+    // expected-remark @+1 {{waiting on a mix of async loads and stores}}
+    %15 = ttg.async_wait %12 {num = 0 : i32}
+    // CHECK: amdg.async_wait {{.*}} {num_inst = 0
+    %16 = ttg.async_wait %14 {num = 0 : i32}
     tt.return
   }
 }

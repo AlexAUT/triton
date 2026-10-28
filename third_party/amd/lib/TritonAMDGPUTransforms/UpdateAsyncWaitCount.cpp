@@ -39,6 +39,8 @@
 // - On CDNA5 the number of (multicast) async_load and async_stores. On
 //   CDNA5 those are out of order with register loads so we will not get
 //   conservative waits.
+//   Async loads and stores can also complete out of order with each other, so
+//   waits with both directions potentially outstanding use a count of zero.
 // For amdg.tdm_async_wait we only count TDM ops, then translate each op to the
 // number of TDM intrinsics emitted by lowering.
 
@@ -162,6 +164,19 @@ int getOpNumberOfAsyncCopyInstructions(Operation *op,
   return 0;
 }
 
+struct AsyncCopyKinds {
+  bool hasLoad = false;
+  bool hasStore = false;
+
+  void visit(Operation *op) {
+    hasLoad |=
+        isa<ttg::AsyncCopyGlobalToLocalOp, amdgpu::BufferLoadToLocalOp>(op);
+    hasStore |= isa<amdgpu::AsyncCopyLocalToGlobalOp>(op);
+  }
+
+  bool isMixed() const { return hasLoad && hasStore; }
+};
+
 // Walks the IR backwards and accumulates countFunc(op) until we find
 // numOustanding ops returning a non zero value. For control flow all possible
 // paths are walked in a recursive DFS way and the minimum number found along
@@ -178,6 +193,10 @@ int getOpNumberOfAsyncCopyInstructions(Operation *op,
 //      ops already visited with the same number of outstanding ops. This
 //      prevents infinite recursion depths for loops without ops contributing
 // - `countFunc`: called on ops to determine if they contribute to the pathSum
+// - `copyKinds`: when non-null, collect transfer directions on all paths until
+//      a full wait or function boundary, even after instruction counting stops.
+//      This includes the older groups the wait must complete. The state is
+//      shared across paths, so memoized paths need not be visited again.
 // - `countCommitGroups`: if true, decrement on AsyncCommitGroupOp (for commit
 //      group counting); if false, decrement numOutstanding when countFunc
 //      returns non-zero (for instruction counting).
@@ -188,7 +207,8 @@ template <bool countCommitGroups>
 int computeMinCountBackward(Operation *cursor, Operation *cameFrom,
                             int numOutstanding, int pathSum, int bestPath,
                             MemoCache &branchStateCache,
-                            llvm::function_ref<int(Operation *)> countFunc) {
+                            llvm::function_ref<int(Operation *)> countFunc,
+                            AsyncCopyKinds *copyKinds = nullptr) {
   assert(cameFrom != nullptr);
   // Step to the previous op within the current block; if none, step to
   // the parent op. Stop at the module since it asserts on ->getPrevNode().
@@ -204,24 +224,36 @@ int computeMinCountBackward(Operation *cursor, Operation *cameFrom,
     return prevOp;
   };
 
-  // Continues the walk and updates bestPath to stop exploration early for paths
-  // leading to a higher sum; repeated calls will return monotonically
-  // decreasing values
+  // Continues the walk and updates bestPath. When tracking copy directions,
+  // a higher sum only stops counting; otherwise it also stops exploration.
   auto continueWalkFrom = [&](Operation *newCursor) {
     auto pathResult = computeMinCountBackward<countCommitGroups>(
         newCursor, cursor, numOutstanding, pathSum, bestPath, branchStateCache,
-        countFunc);
+        countFunc, copyKinds);
     bestPath = std::min(bestPath, pathResult);
     return pathResult;
   };
 
   // Walk backwards through the IR
   while (cursor) {
-    // numOutstanding is inclusive so we have to walk until < 0 to include the
-    // async ops from the last outstanding commit group. Also prune path if the
-    // current path cannot beat the known minimum.
+    // Stop counting after the last outstanding group, or once this path
+    // cannot improve the minimum. When checking transfer directions, keep
+    // traversing: an older copy may still be outstanding in the other
+    // direction.
     if (numOutstanding < 0 || pathSum >= bestPath) {
-      return std::min(bestPath, pathSum);
+      // Once both directions are known, only the ordinary minimum count is
+      // needed to decide whether the fallback loses overlap.
+      if (!copyKinds || copyKinds->isMixed())
+        return std::min(bestPath, pathSum);
+      numOutstanding = -1;
+      pathSum = std::min(bestPath, pathSum);
+    }
+    if constexpr (countCommitGroups) {
+      // Stop if a previous wait syncs all outstanding operations.
+      if (auto wait = dyn_cast<amdgpu::AsyncWaitOp>(cursor)) {
+        if (wait.getNumInst() == 0)
+          return std::min(bestPath, pathSum);
+      }
     }
 
     // Handle operations with subregions.
@@ -308,12 +340,14 @@ int computeMinCountBackward(Operation *cursor, Operation *cameFrom,
     }
 
     // Non-control-flow ops: keep walking and accumulate via countFunc
-    int count = countFunc(cursor);
+    if (copyKinds)
+      copyKinds->visit(cursor);
+    int count = numOutstanding >= 0 ? countFunc(cursor) : 0;
     pathSum += count;
 
     // Decrement numOutstanding based on counting mode
     if constexpr (countCommitGroups) {
-      if (isa<ttg::AsyncCommitGroupOp>(cursor))
+      if (numOutstanding >= 0 && isa<ttg::AsyncCommitGroupOp>(cursor))
         numOutstanding--;
     } else {
       // For instruction counting: decrement when we find an operation that
@@ -329,13 +363,30 @@ int computeMinCountBackward(Operation *cursor, Operation *cameFrom,
   return std::min(pathSum, bestPath);
 }
 
+void emitMixedAsyncCopyRemark(ttg::AsyncWaitOp waitOp) {
+  waitOp.emitRemark(
+      "waiting on a mix of async loads and stores requires a "
+      "conservative waits. It is recommend to separate them by reordering to "
+      "wait only on one kind of instruction at a time.");
+}
+
 // Overload for ease of use with AsyncWait (counts commit groups)
 int computeMinCountBackward(ttg::AsyncWaitOp waitOp,
-                            llvm::function_ref<int(Operation *)> countFunc) {
+                            llvm::function_ref<int(Operation *)> countFunc,
+                            bool checkMixedCopies) {
   MemoCache memoCache;
-  return computeMinCountBackward</*countCommitGroups=*/true>(
+  AsyncCopyKinds copyKinds;
+  int waitCnt = computeMinCountBackward</*countCommitGroups=*/true>(
       waitOp, waitOp, waitOp.getNum(), 0, std::numeric_limits<int>::max(),
-      memoCache, countFunc);
+      memoCache, countFunc, checkMixedCopies ? &copyKinds : nullptr);
+  // If we found both directions and the waitcnt is >0 we have to clamp it ot 0
+  // and emit a performance remark due to the conservative wait.
+  if (copyKinds.isMixed()) {
+    if (waitCnt > 0)
+      emitMixedAsyncCopyRemark(waitOp);
+    return 0;
+  }
+  return waitCnt;
 }
 
 // Overload for ease of use with AsyncTDMWait (counts TDM instructions)
@@ -359,7 +410,7 @@ int computeMinCountBackward(triton::amdgpu::AsyncTDMWait waitOp,
 template <typename WaitType>
 void updateWaitCount(WaitType waitOp,
                      llvm::function_ref<int(Operation *)> computeCountForOp,
-                     RewriterBase &rewriter) {
+                     RewriterBase &rewriter, bool checkMixedCopies = false) {
   int waitCnt = std::numeric_limits<int>::max();
 
   if (waitOp.getNumOperands() > 0) {
@@ -372,11 +423,24 @@ void updateWaitCount(WaitType waitOp,
           deduceMinCountOnDefChain(token, waitOp, computeCountForOp);
       waitCnt = std::min(waitCnt, tokenWaitCnt);
     }
+    if constexpr (std::is_same_v<WaitType, ttg::AsyncWaitOp>) {
+      // Token def chains omit older pending groups. Conservatively drain all
+      // copies when the module contains both transfer directions.
+      if (checkMixedCopies) {
+        if (waitCnt > 0 && waitCnt != std::numeric_limits<int>::max())
+          emitMixedAsyncCopyRemark(waitOp);
+        waitCnt = 0;
+      }
+    }
   } else {
     // For tokenless waits we treat `num` as the number:
     // - ttg.async_wait: number of outstanding commit groups
     // - amdg.async_tdm_wait: number of outstanding TDM operations
-    waitCnt = computeMinCountBackward(waitOp, computeCountForOp);
+    if constexpr (std::is_same_v<WaitType, ttg::AsyncWaitOp>)
+      waitCnt =
+          computeMinCountBackward(waitOp, computeCountForOp, checkMixedCopies);
+    else
+      waitCnt = computeMinCountBackward(waitOp, computeCountForOp);
   }
 
   if (waitCnt == std::numeric_limits<int>::max()) {
@@ -435,8 +499,12 @@ struct TritonAMDGPUUpdateAsyncWaitCountPass
     if (!targetFeatures.useAsyncMarks()) {
       // CDNA5 (and future arches without asyncmark) use instruction counting.
       SmallVector<ttg::AsyncWaitOp> waitOps;
-      getOperation()->walk(
-          [&](ttg::AsyncWaitOp waitOp) { waitOps.push_back(waitOp); });
+      AsyncCopyKinds copyKinds;
+      m.walk([&](Operation *op) {
+        copyKinds.visit(op);
+        if (auto waitOp = dyn_cast<ttg::AsyncWaitOp>(op))
+          waitOps.push_back(waitOp);
+      });
 
       ModuleAxisInfoAnalysis axisInfo(m);
       DenseMap<Operation *, int> intrinsicCountCache;
@@ -454,7 +522,8 @@ struct TritonAMDGPUUpdateAsyncWaitCountPass
 
       for (auto waitOp : waitOps) {
         IRRewriter builder(waitOp->getContext());
-        updateWaitCount(waitOp, countAsyncLoadInstructions, builder);
+        updateWaitCount(waitOp, countAsyncLoadInstructions, builder,
+                        /*checkMixedCopies=*/copyKinds.isMixed());
       }
     }
 
