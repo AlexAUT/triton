@@ -1,4 +1,5 @@
 // RUN: triton-opt %s -split-input-file --tritonamdgpu-update-async-wait-count=gfx-arch=gfx1250 | FileCheck %s
+// RUN: triton-opt %s -split-input-file --tritonamdgpu-update-async-wait-count=gfx-arch=gfx1250 -verify-diagnostics
 
 // The number in SSA symbolic names represents the number of generated async load operation at assembly level a ttg.async_copy_global_to_local will generate, which is counted by this pass.
 // For example `ttg.async_copy_global_to_local %ptr2Inst, %memDesc2Inst ..` will generate two global_load_async_to_lds_b128 assembly instruction
@@ -23,8 +24,6 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     ttg.async_copy_global_to_local %ptr2Inst, %memDesc2Inst : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared, #smem, mutable>
     ttg.async_commit_group
 
-    // CHECK: amdg.async_wait {num_inst = 0
-    ttg.async_wait {num = 0 : i32}
     // 1 outstanding commit group (2nd): 2 instructions
     // CHECK: amdg.async_wait {num_inst = 2
     ttg.async_wait {num = 1 : i32}
@@ -34,6 +33,11 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     // Only 2 commit groups exist, stop at function boundary
     // CHECK: amdg.async_wait {num_inst = 3
     ttg.async_wait {num = 3 : i32}
+    // CHECK: amdg.async_wait {num_inst = 0
+    ttg.async_wait {num = 0 : i32}
+    // The preceding full wait is a boundary: no copies remain outstanding.
+    // CHECK: amdg.async_wait {num_inst = 0
+    ttg.async_wait {num = 1 : i32}
 
     tt.return
   }
@@ -75,7 +79,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
       ttg.async_copy_global_to_local %ptr2Inst, %memDesc2Inst : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared, #smem, mutable>
       ttg.async_commit_group
     }
-    // CHECK: amdg.async_wait {num_inst = 1
+    // The skipped path has only one group, which may remain outstanding.
+    // Only the then path constrains the instruction count.
+    // CHECK: amdg.async_wait {num_inst = 2
     ttg.async_wait {num = 1: i32}
 
     ttg.async_copy_global_to_local %ptr2Inst, %memDesc2Inst : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared, #smem, mutable>
@@ -442,8 +448,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     ttg.async_wait {num = 6: i32}
 
     %70 = scf.while (%arg10 = %cond) : (i1) -> (i1) {
-      // Escape while and count prologue = 6
-      // CHECK: amdg.async_wait {num_inst = 6
+      // The initial-entry path has only six groups and needs no completion.
+      // So we have to complete staying in the loop
+      // CHECK: amdg.async_wait {num_inst = 8
       ttg.async_wait {num = 6: i32}
       ttg.async_copy_global_to_local %ptr2Inst, %memDesc2Inst : tensor<128x16x!tt.ptr<f16>, #blocked> -> <128x16xf16, #shared, #smem, mutable>
       ttg.async_commit_group
@@ -639,4 +646,72 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
     tt.return
   }
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [8, 4], warpsPerCTA = [4, 1], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 8, perPhase = 8, maxPhase = 2, order = [1, 0]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: wait_count_loop_without_commit_groups
+  tt.func public @wait_count_loop_without_commit_groups(
+      %n: i32,
+      %loadPtr: tensor<32x32x!tt.ptr<f32>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>},
+      %loadDst: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
+    %c0 = arith.constant 0 : i32
+    %c1 = arith.constant 1 : i32
+    %false = arith.constant dense<false> : tensor<32x32xi1, #blocked>
+    scf.for %i = %c0 to %n step %c1 : i32 {
+      ttg.async_copy_global_to_local %loadPtr, %loadDst mask %false : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+    }
+    ttg.async_copy_global_to_local %loadPtr, %loadDst : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+    ttg.async_commit_group
+    // The backward walk must terminate even with a growing instruction
+    // count inside a loop with no commit groups.
+    // CHECK: amdg.async_wait {num_inst = 2 : i32, ttg.num_commit_groups = 1 : i32}
+    ttg.async_wait {num = 1 : i32}
+    tt.return
+  }
+
+  // CHECK-LABEL: full_wait_before_conditional_load_group
+  tt.func public @full_wait_before_conditional_load_group(
+      %cond: i1,
+      %loadPtr: tensor<32x32x!tt.ptr<f32>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>},
+      %loadDst0: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>,
+      %loadDst1: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
+    ttg.async_copy_global_to_local %loadPtr, %loadDst0 : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+    ttg.async_commit_group
+    // CHECK: amdg.async_wait {num_inst = 0
+    ttg.async_wait {num = 0 : i32}
+    scf.if %cond {
+      ttg.async_copy_global_to_local %loadPtr, %loadDst0 : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+      ttg.async_commit_group
+      ttg.async_copy_global_to_local %loadPtr, %loadDst1 : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+      ttg.async_commit_group
+    }
+    // CHECK: amdg.async_wait {num_inst = 2 : i32, ttg.num_commit_groups = 1 : i32}
+    ttg.async_wait {num = 1 : i32}
+    tt.return
+  }
+
+  // CHECK-LABEL: kernel_start_before_conditional_load_groups
+  tt.func public @kernel_start_before_conditional_load_groups(
+      %cond: i1,
+      %loadPtr: tensor<32x32x!tt.ptr<f32>, #blocked> {tt.divisibility = dense<[16, 16]> : tensor<2xi32>, tt.contiguity = dense<[16, 16]> : tensor<2xi32>},
+      %loadDst0: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>,
+      %loadDst1: !ttg.memdesc<32x32xf32, #shared, #smem, mutable>) {
+    scf.if %cond {
+      ttg.async_copy_global_to_local %loadPtr, %loadDst0 : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+      ttg.async_commit_group
+      ttg.async_copy_global_to_local %loadPtr, %loadDst1 : tensor<32x32x!tt.ptr<f32>, #blocked> -> <32x32xf32, #shared, #smem, mutable>
+      ttg.async_commit_group
+    }
+    // CHECK: amdg.async_wait {num_inst = 2 : i32, ttg.num_commit_groups = 1 : i32}
+    ttg.async_wait {num = 1 : i32}
+    // CHECK: amdg.async_wait {num_inst = 0
+    ttg.async_wait {num = 0 : i32}
+    tt.return
+  }
+
 }

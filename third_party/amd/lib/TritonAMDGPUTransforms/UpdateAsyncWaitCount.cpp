@@ -162,6 +162,18 @@ int getOpNumberOfAsyncCopyInstructions(Operation *op,
   return 0;
 }
 
+// Only copies older than the groups allowed to remain outstanding require
+// completion. State is local to each backward path.
+struct AsyncWaitPathState {
+  bool needsCompletion = false;
+};
+
+struct AsyncWaitCountAnalysis {
+  // If every path is already satisfied, retain a nonzero instruction count
+  // from one of those paths rather than introducing an unnecessary full wait.
+  int unconstrainedCount = std::numeric_limits<int>::max();
+};
+
 // Walks the IR backwards and accumulates countFunc(op) until we find
 // numOustanding ops returning a non zero value. For control flow all possible
 // paths are walked in a recursive DFS way and the minimum number found along
@@ -178,17 +190,26 @@ int getOpNumberOfAsyncCopyInstructions(Operation *op,
 //      ops already visited with the same number of outstanding ops. This
 //      prevents infinite recursion depths for loops without ops contributing
 // - `countFunc`: called on ops to determine if they contribute to the pathSum
+// - `waitAnalysis`: when non-null, ignore paths ending at a full wait or
+//      function entry with no copies requiring completion.
+//      Exploration continues beyond the counted groups until a full wait or
+//      function boundary. `pathState` holds the state of the current path.
 // - `countCommitGroups`: if true, decrement on AsyncCommitGroupOp (for commit
 //      group counting); if false, decrement numOutstanding when countFunc
 //      returns non-zero (for instruction counting).
 // TODO: walk static loops correctly to avoid conservative loops. (static loops
 // from Gluon are unrolled right now)
-using MemoCache = llvm::DenseSet<std::tuple<Operation *, int, int>>;
+// A previously visited state with a smaller sum dominates the current path.
+// Omitting pathSum from the key also bounds loops containing uncommitted
+// copies.
+using MemoCache = llvm::DenseMap<std::tuple<Operation *, int, unsigned>, int>;
 template <bool countCommitGroups>
 int computeMinCountBackward(Operation *cursor, Operation *cameFrom,
                             int numOutstanding, int pathSum, int bestPath,
                             MemoCache &branchStateCache,
-                            llvm::function_ref<int(Operation *)> countFunc) {
+                            llvm::function_ref<int(Operation *)> countFunc,
+                            AsyncWaitCountAnalysis *waitAnalysis = nullptr,
+                            AsyncWaitPathState pathState = {}) {
   assert(cameFrom != nullptr);
   // Step to the previous op within the current block; if none, step to
   // the parent op. Stop at the module since it asserts on ->getPrevNode().
@@ -204,24 +225,50 @@ int computeMinCountBackward(Operation *cursor, Operation *cameFrom,
     return prevOp;
   };
 
-  // Continues the walk and updates bestPath to stop exploration early for paths
-  // leading to a higher sum; repeated calls will return monotonically
-  // decreasing values
+  // Continue each branch with its own copy state and update the minimum
+  // over paths that impose a completion requirement.
   auto continueWalkFrom = [&](Operation *newCursor) {
     auto pathResult = computeMinCountBackward<countCommitGroups>(
         newCursor, cursor, numOutstanding, pathSum, bestPath, branchStateCache,
-        countFunc);
+        countFunc, waitAnalysis, pathState);
     bestPath = std::min(bestPath, pathResult);
     return pathResult;
   };
 
-  // Walk backwards through the IR
+  auto finishPath = [&]() {
+    if (waitAnalysis && !pathState.needsCompletion) {
+      // This path places no bound on the hardware wait count. In particular,
+      // an empty path after a full wait must not lower the minimum to zero.
+      if (pathSum > 0)
+        waitAnalysis->unconstrainedCount =
+            std::min(waitAnalysis->unconstrainedCount, pathSum);
+      return bestPath;
+    }
+    return std::min(bestPath, pathSum);
+  };
+
+  auto visitLoopState = [&]() {
+    unsigned state = pathState.needsCompletion;
+    auto cacheKey = std::make_tuple(cursor, numOutstanding, state);
+    auto [it, inserted] = branchStateCache.try_emplace(cacheKey, pathSum);
+    if (!inserted && it->second <= pathSum)
+      return false;
+    it->second = pathSum;
+    return true;
+  };
+
+  // Walk backwards through the IR.
   while (cursor) {
-    // numOutstanding is inclusive so we have to walk until < 0 to include the
-    // async ops from the last outstanding commit group. Also prune path if the
-    // current path cannot beat the known minimum.
-    if (numOutstanding < 0 || pathSum >= bestPath) {
+    if (!waitAnalysis && (numOutstanding < 0 || pathSum >= bestPath))
       return std::min(bestPath, pathSum);
+    if (waitAnalysis && bestPath == 0)
+      return 0;
+    if constexpr (countCommitGroups) {
+      // A full wait bounds the outstanding copies on this path.
+      if (auto wait = dyn_cast<amdgpu::AsyncWaitOp>(cursor)) {
+        if (wait.getNumInst() == 0)
+          return finishPath();
+      }
     }
 
     // Handle operations with subregions.
@@ -249,8 +296,7 @@ int computeMinCountBackward(Operation *cursor, Operation *cameFrom,
 
       // If we came from the body only walk it again if it's not in the cache
       auto cameFromBody = cameFrom->getBlock() == forOp.getBody();
-      auto cacheKey = std::make_tuple(cursor, numOutstanding, pathSum);
-      if (!cameFromBody || branchStateCache.insert(cacheKey).second) {
+      if (!cameFromBody || visitLoopState()) {
         continueWalkFrom(forOp.getBody()->getTerminator());
       }
       return bestPath;
@@ -270,10 +316,8 @@ int computeMinCountBackward(Operation *cursor, Operation *cameFrom,
       } else if (cameFromBefore) {
         // Walk upwards
         continueWalkFrom(getPredecessor(whileOp));
-        // Do not walk the after-block if we already visited it with a lower
-        // num outstanding because we already walked an identical path
-        auto cacheKey = std::make_tuple(cursor, numOutstanding, pathSum);
-        if (branchStateCache.insert(cacheKey).second)
+        // Do not revisit an identical state with an equal or higher sum.
+        if (visitLoopState())
           continueWalkFrom(whileOp.getAfterBody()->getTerminator());
       }
       return bestPath;
@@ -296,8 +340,9 @@ int computeMinCountBackward(Operation *cursor, Operation *cameFrom,
       }
       return bestPath;
     } else if (isa<triton::FuncOp>(cursor)) {
-      // Reached function boundary; return current sum (conservative)
-      return std::min(bestPath, pathSum);
+      // At function entry there are no older copies. If every encountered
+      // copy may remain outstanding, this path imposes no constraint.
+      return finishPath();
     } else if (cursor->getNumRegions() > 0 && !isa<triton::ReduceOp>(cursor)) {
       // For unhandled ops with subregions we conservatively bail out.
       // We ignore triton.reduce because it cannot contain async ops
@@ -308,12 +353,17 @@ int computeMinCountBackward(Operation *cursor, Operation *cameFrom,
     }
 
     // Non-control-flow ops: keep walking and accumulate via countFunc
-    int count = countFunc(cursor);
+    if (waitAnalysis)
+      pathState.needsCompletion |=
+          numOutstanding < 0 &&
+          isa<ttg::AsyncCopyGlobalToLocalOp, amdgpu::BufferLoadToLocalOp,
+              amdgpu::AsyncCopyLocalToGlobalOp>(cursor);
+    int count = numOutstanding >= 0 ? countFunc(cursor) : 0;
     pathSum += count;
 
     // Decrement numOutstanding based on counting mode
     if constexpr (countCommitGroups) {
-      if (isa<ttg::AsyncCommitGroupOp>(cursor))
+      if (numOutstanding >= 0 && isa<ttg::AsyncCommitGroupOp>(cursor))
         numOutstanding--;
     } else {
       // For instruction counting: decrement when we find an operation that
@@ -325,17 +375,24 @@ int computeMinCountBackward(Operation *cursor, Operation *cameFrom,
     cameFrom = cursor;
     cursor = getPredecessor(cursor);
   }
-  // No more ops or parents to traverse; return the accumulated count.
-  return std::min(pathSum, bestPath);
+  return finishPath();
 }
 
 // Overload for ease of use with AsyncWait (counts commit groups)
 int computeMinCountBackward(ttg::AsyncWaitOp waitOp,
                             llvm::function_ref<int(Operation *)> countFunc) {
   MemoCache memoCache;
-  return computeMinCountBackward</*countCommitGroups=*/true>(
+  AsyncWaitCountAnalysis waitAnalysis;
+  int waitCnt = computeMinCountBackward</*countCommitGroups=*/true>(
       waitOp, waitOp, waitOp.getNum(), 0, std::numeric_limits<int>::max(),
-      memoCache, countFunc);
+      memoCache, countFunc, &waitAnalysis);
+  if (waitCnt == std::numeric_limits<int>::max()) {
+    // Every explored path is already satisfied. Any instruction count is
+    // safe; reuse a positive count from an unconstrained path if available.
+    // TODO: we could remove the AsyncWait since it doesn't wait on anything.
+    waitCnt = waitAnalysis.unconstrainedCount;
+  }
+  return waitCnt;
 }
 
 // Overload for ease of use with AsyncTDMWait (counts TDM instructions)
